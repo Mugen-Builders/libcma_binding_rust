@@ -1,6 +1,8 @@
 use crate::types::*;
 use ethers::types::{Address, U256, Bytes};
 
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TxHexCodes {
     // Bytecode for solidity WithdrawEther(uint256,bytes) = 8cf70f0b
     WithdrawEther = 0x8cf70f0b,
