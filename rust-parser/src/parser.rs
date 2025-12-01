@@ -1,5 +1,7 @@
 use crate::types::*;
 use ethers::types::{Address, U256, Bytes};
+use json::{object, JsonValue};
+use hex;
 
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +46,11 @@ enum CmaVoucherFieldType {
     Erc1155BatchVoucherFields(CmaParserErc1155BatchVoucherFields),
 }
 
+enum TokenType {
+    Erc20,
+    Erc721,
+}
+
 enum CmaParserInputType {
     CmaParserInputTypeNone,
     CmaParserInputTypeAuto,
@@ -75,12 +82,13 @@ enum CmaParserVoucherType {
     CmaParserVoucherTypeErc1155Batch,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CmaParserError {
     Success,
     IncompatibleInput,
     MalformedInput,
     Unknown,
+    Message(String),
 }
 
 impl CmaParserError {
@@ -90,6 +98,7 @@ impl CmaParserError {
             -2001 => Self::IncompatibleInput,
             -2002 => Self::MalformedInput,
             -2003 => Self::Unknown,
+            -2004 => Self::Message("Unknown error".to_string()),
             _ => Self::Unknown, 
         }
     }
@@ -100,6 +109,7 @@ impl CmaParserError {
             Self::IncompatibleInput => -2001,
             Self::MalformedInput => -2002,
             Self::Unknown => -2003,
+            Self::Message(_) => -2004
         }
     }
 }
@@ -301,10 +311,261 @@ pub struct CmtRollupInspect {
     // TODO: Define the structure fields
 }
 
+fn handle_parse_ether_deposit(input: JsonValue) -> Result<CmaParserInputData, CmaParserError> {
+    let payload_hex = input["data"]["payload"].as_str().ok_or(CmaParserError::Message(String::from("Invalid payload hex")))?;
+    let payload = payload_hex.trim_start_matches("0x");
+
+    let bytes = hex::decode(payload).map_err(|e| CmaParserError::Message(format!("hex decode error: {}", e)))?;
+
+    if bytes.len() < 20 + 32 {
+        return Err(CmaParserError::Message("Invalid payload length".to_string()));
+    }
+
+    let sender_bytes = &bytes[0..20];
+    let sender = Address::from_slice(sender_bytes);
+
+    let value_bytes = &bytes[20..52];
+    let value = U256::from_big_endian(value_bytes);
+
+    let exec_layer_data = Bytes::from(bytes[52..].to_vec());
+
+    Ok(CmaParserInputData::EtherDeposit(CmaParserEtherDeposit {
+        sender,
+        amount: value,
+        exec_layer_data,
+    }))
+}
+
+fn handle_parse_erc20_and_erc721_deposit(input: JsonValue, t_type: TokenType) -> Result<CmaParserInputData, CmaParserError> {
+    let payload_hex = input["data"]["payload"].as_str().ok_or(CmaParserError::Message(String::from("Invalid payload hex")))?;
+    let payload = payload_hex.trim_start_matches("0x");
+
+    let bytes = hex::decode(payload).map_err(|e| CmaParserError::Message(format!("hex decode error: {}", e)))?;
+
+    if bytes.len() < 20 + 20 + 32 {
+        return Err(CmaParserError::Message("Invalid payload length".to_string()));
+    }
+
+    let token = &bytes[0..20];
+    let sender = &bytes[20..40];
+    let amount_bytes = &bytes[40..72];
+    let amount = U256::from_big_endian(amount_bytes);
+    let exec_layer_data = Bytes::from(bytes[72..].to_vec());
+
+    match t_type {
+        TokenType::Erc20 => Ok(CmaParserInputData::Erc20Deposit(CmaParserErc20Deposit {
+            sender: Address::from_slice(sender),
+            token: Address::from_slice(token),
+            amount,
+            exec_layer_data,
+        })),
+        TokenType::Erc721 => Ok(CmaParserInputData::Erc721Deposit(CmaParserErc721Deposit {
+            sender: Address::from_slice(sender),
+            token: Address::from_slice(token),
+            token_id: amount,
+            exec_layer_data,
+        }))
+    }
+}
+
+fn handle_parse_erc1155_single_deposit(input: JsonValue) -> Result<CmaParserInputData, CmaParserError> {
+    let payload_hex = input["data"]["payload"].as_str().ok_or(CmaParserError::Message(String::from("Invalid payload hex")))?;
+    let payload = payload_hex.trim_start_matches("0x");
+
+    let bytes = hex::decode(payload).map_err(|e| CmaParserError::Message(format!("hex decode error: {}", e)))?;
+
+    if bytes.len() < 20 + 20 + 32 + 32 {
+        return Err(CmaParserError::Message("Invalid payload length".to_string()));
+    }
+
+    let token = &bytes[0..20];
+    let sender = &bytes[20..40];
+    let token_id_bytes = &bytes[40..72];
+    let token_id = U256::from_big_endian(token_id_bytes);
+    let amount_bytes = &bytes[72..104];
+    let amount = U256::from_big_endian(amount_bytes);
+    let _base_layer_data = Bytes::from(bytes[104..136].to_vec());
+    let exec_layer_data = Bytes::from(bytes[136..].to_vec());
+
+    Ok(CmaParserInputData::Erc1155SingleDeposit(CmaParserErc1155SingleDeposit {
+        sender: Address::from_slice(sender),
+        token: Address::from_slice(token),
+        token_id,
+        amount,
+        exec_layer_data,
+    }) )
+}
 
 
-pub fn cma_decode_advance(req_type:  CmaParserInputType, input: CmtRollupAdvance) -> Result<CmaParserInput, CmaParserError> {
+fn handle_parse_erc1155_batch_deposit(input: JsonValue) -> Result<CmaParserInputData, CmaParserError> {
+    let payload_hex = input["data"]["payload"].as_str().ok_or(CmaParserError::Message(String::from("Invalid payload hex")))?;
+    let payload = payload_hex.trim_start_matches("0x");
 
+    let bytes = hex::decode(payload).map_err(|e| CmaParserError::Message(format!("hex decode error: {}", e)))?;
+
+    if bytes.len() < 20 + 20 + 32 + 32 + 32 {
+        return Err(CmaParserError::Message("Invalid payload length".to_string()));
+    }
+
+    let u256_from = |b: &[u8]| U256::from_big_endian(b);
+    let as_addr = |b: &[u8]| Address::from_slice(&b[12..32]);
+
+    let token   = as_addr(&bytes[0..32]);
+    let sender  = as_addr(&bytes[32..64]);
+
+    let token_ids_offset = u256_from(&bytes[64..96]).as_usize();
+    let values_offset    = u256_from(&bytes[96..128]).as_usize();
+    let base_offset      = u256_from(&bytes[128..160]).as_usize();
+    let exec_offset      = u256_from(&bytes[160..192]).as_usize();
+
+    let token_ids_len = u256_from(&bytes[token_ids_offset..token_ids_offset+32]).as_usize();
+    let mut token_ids = Vec::with_capacity(token_ids_len);
+
+    let mut cursor = token_ids_offset + 32;
+    for _ in 0..token_ids_len {
+        token_ids.push(u256_from(&bytes[cursor..cursor+32]));
+        cursor += 32;
+    }
+
+    let values_len = u256_from(&bytes[values_offset..values_offset+32]).as_usize();
+    let mut values = Vec::with_capacity(values_len);
+
+    let mut cursor2 = values_offset + 32;
+    for _ in 0..values_len {
+        values.push(u256_from(&bytes[cursor2..cursor2+32]));
+        cursor2 += 32;
+    }
+
+    let base_len = u256_from(&bytes[base_offset..base_offset+32]).as_usize();
+    let base_start = base_offset + 32;
+    let base_end = base_start + base_len;
+    let base_layer_data = Bytes::from(bytes[base_start..base_end].to_vec());
+
+    let exec_len = u256_from(&bytes[exec_offset..exec_offset+32]).as_usize();
+    let exec_start = exec_offset + 32;
+    let exec_end = exec_start + exec_len;
+    let exec_layer_data = Bytes::from(bytes[exec_start..exec_end].to_vec());
+
+    if token_ids_len == 0 || values_len == 0 || token_ids_len != values_len {
+        return Err(CmaParserError::Message("Invalid payload data".to_string()));
+    }
+
+    Ok(CmaParserInputData::Erc1155BatchDeposit(CmaParserErc1155BatchDeposit {
+        sender,
+        token,
+        count: token_ids_len,
+        token_ids,
+        amounts: values,
+        base_layer_data,
+        exec_layer_data,
+    }))
+}
+
+pub fn cma_decode_advance(req_type:  CmaParserInputType, input: JsonValue) -> Result<CmaParserInput, CmaParserError> {
+
+    match req_type {
+        CmaParserInputType::CmaParserInputTypeNone => {
+
+            Err(CmaParserError::Unknown) // Placeholder
+        },
+        CmaParserInputType::CmaParserInputTypeAuto => {
+
+            Err(CmaParserError::Unknown) // Placeholder
+        },
+        CmaParserInputType::CmaParserInputTypeEtherDeposit => {
+            return handle_parse_ether_deposit(input).map(|data| CmaParserInput {
+                    req_type,
+                    input: data,
+                });
+            },
+        CmaParserInputType::CmaParserInputTypeErc20Deposit => {
+            return handle_parse_erc20_and_erc721_deposit(input, TokenType::Erc20).map(|data| CmaParserInput {
+                    req_type,
+                    input: data,
+                });
+        },
+        CmaParserInputType::CmaParserInputTypeErc721Deposit => {
+            return handle_parse_erc20_and_erc721_deposit(input, TokenType::Erc721).map(|data| CmaParserInput {
+                    req_type,
+                    input: data,
+                });
+        },
+        CmaParserInputType::CmaParserInputTypeErc1155SingleDeposit => {
+            return handle_parse_erc1155_single_deposit(input).map(|data| CmaParserInput {
+                    req_type,
+                    input: data,
+                });
+        },
+        CmaParserInputType::CmaParserInputTypeErc1155BatchDeposit => {
+            return handle_parse_erc1155_batch_deposit(input).map(|data| CmaParserInput {
+                    req_type,
+                    input: data,
+                });
+        },
+        CmaParserInputType::CmaParserInputTypeEtherWithdrawal => {
+
+            // Return CmaParserInput with Erc20Deposit data
+            Err(CmaParserError::Unknown) // Placeholder
+        },
+
+        CmaParserInputType::CmaParserInputTypeErc20Withdrawal => {
+
+            // Return CmaParserInput with EtherDeposit data
+            Err(CmaParserError::Unknown) // Placeholder
+        },
+        CmaParserInputType::CmaParserInputTypeErc721Withdrawal => {
+
+            // Return CmaParserInput with Erc20Deposit data
+            Err(CmaParserError::Unknown) // Placeholder
+        },
+        CmaParserInputType::CmaParserInputTypeErc1155SingleWithdrawal => {
+
+            // Return CmaParserInput with EtherDeposit data
+            Err(CmaParserError::Unknown) // Placeholder
+        },
+        CmaParserInputType::CmaParserInputTypeErc1155BatchWithdrawal => {
+
+            // Return CmaParserInput with Erc20Deposit data
+            Err(CmaParserError::Unknown) // Placeholder
+        },
+        CmaParserInputType::CmaParserInputTypeEtherTransfer => {
+
+            // Return CmaParserInput with EtherDeposit data
+            Err(CmaParserError::Unknown) // Placeholder
+        },
+        CmaParserInputType::CmaParserInputTypeErc20Transfer => {
+
+            // Return CmaParserInput with Erc20Deposit data
+            Err(CmaParserError::Unknown) // Placeholder
+        },
+        CmaParserInputType::CmaParserInputTypeErc721Transfer => {
+
+            // Return CmaParserInput with EtherDeposit data
+            Err(CmaParserError::Unknown) // Placeholder
+        },
+        CmaParserInputType::CmaParserInputTypeErc1155SingleTransfer => {
+
+            // Return CmaParserInput with Erc20Deposit data
+            Err(CmaParserError::Unknown) // Placeholder
+        },
+        CmaParserInputType::CmaParserInputTypeErc1155BatchTransfer => {
+
+            // Return CmaParserInput with Erc20Deposit data
+            Err(CmaParserError::Unknown) // Placeholder
+        },
+        CmaParserInputType::CmaParserInputTypeBalance => {
+
+            // Return CmaParserInput with EtherDeposit data
+            Err(CmaParserError::Unknown) // Placeholder
+        },
+        CmaParserInputType::CmaParserInputTypeSupply => {
+
+            // Return CmaParserInput with Erc20Deposit data
+            Err(CmaParserError::Unknown) // Placeholder
+        },
+        // Handle other request types similarly...
+        _ => Err(CmaParserError::IncompatibleInput),
+    }
 }
 
 pub fn cma_decode_inspect(req_type:  CmaParserInputType, input: CmtRollupInspect) -> Result<CmaParserInput, CmaParserError> {

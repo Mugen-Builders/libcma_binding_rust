@@ -5,3 +5,5 @@ edition = "2024"
 
 [dependencies]
 ethers = "2.0.14"
+hex = "0.4.3"
+json = "0.12.4"
