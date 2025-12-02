@@ -2494,6 +2494,7 @@ dependencies = [
  "ethers",
  "hex",
  "json",
+ "once_cell",
 ]
 
 [[package]]
