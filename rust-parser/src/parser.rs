@@ -1,5 +1,7 @@
 use crate::types::*;
 use ethers::types::{Address, U256, Bytes};
+use ethers::abi::{Token, encode};
+use ethers::utils::{id, to_checksum};
 use json::{JsonValue};
 use hex;
 use crate::helpers::{hex_to_string, CARTESI_ADDRESSES, Portals, PortalMatcher};
@@ -142,9 +144,9 @@ impl CmaParserError {
 }
 
 pub struct CmaVoucher {
-    pub address: Address,
-    pub value: U256,
-    pub data: Bytes,
+    pub destination: String,
+    pub value: String,
+    pub payload: String,
 }
 
 pub struct CmaParserVoucherData {
@@ -154,25 +156,34 @@ pub struct CmaParserVoucherData {
 
 pub struct CmaParserEtherVoucherFields {
     pub amount: U256,
+    pub receiver: Address,
 }
 pub struct CmaParserErc20VoucherFields {
     pub token: Address,
+    pub receiver: Address,
+    pub value: U256,
     pub amount: U256,
 }
 pub struct CmaParserErc721VoucherFields {
     pub token: Address,
     pub token_id: U256,
-    pub exec_layer_data: Bytes,
+    pub receiver: Address,
+    pub value: U256,
+    pub application_address: Address,
 }
 pub struct CmaParserErc1155SingleVoucherFields {
     pub token: Address,
     pub token_id: U256,
+    pub receiver: Address,
+    pub value: U256,
     pub amount: U256,
 }
 pub struct CmaParserErc1155BatchVoucherFields {
     pub token: Address,
+    pub receiver: Address,
     pub count: usize,
     pub token_ids: Vec<U256>,
+    pub value: U256,
     pub amounts: Vec<U256>,
 }
 
@@ -746,8 +757,118 @@ pub fn cma_decode_inspect(_req_type:  CmaParserInputType, _input: JsonValue) -> 
     Err(CmaParserError::Message( String::from("Not Implemented yet")))
 }
 
-pub fn cma_encode_voucher (_req_type: CmaParserVoucherType, _app_address: Address, _voucher_request: CmaParserVoucherData ) -> Result<CmaVoucher, CmaParserError> {
+fn handle_ether_voucher_encoding(
+    voucher_request: &CmaParserVoucherData
+) -> Result<CmaVoucher, CmaParserError> 
+{
+    if let CmaVoucherFieldType::EtherVoucherFields(fields) = &voucher_request.voucher_fields {
 
-    Err(CmaParserError::Message( String::from("Not Implemented yet")))
+        let payload = "0x".to_string();  
+
+        let mut value_bytes = [0u8; 32];
+        fields.amount.to_big_endian(&mut value_bytes);
+
+        let voucher = CmaVoucher {
+            destination: to_checksum(&fields.receiver, None),   
+            value: format!("0x{}", hex::encode(value_bytes)),   
+            payload,                                           
+        };
+
+        Ok(voucher)
+    } else {
+        Err(CmaParserError::Message(
+            String::from("Invalid voucher fields for Ether")
+        ))
+    }
 }
 
+fn handle_erc20_voucher_encoding(voucher_request: &CmaParserVoucherData) -> Result<CmaVoucher, CmaParserError> {
+    if let CmaVoucherFieldType::Erc20VoucherFields(fields) = &voucher_request.voucher_fields {
+        let token = fields.token;
+
+        let args: Vec<Token> = vec![
+            Token::Address(fields.receiver),
+            Token::Uint(fields.amount),
+        ];
+
+        let function_sig = "transfer(address,uint256)";
+        let selector = &id(function_sig)[..4];
+
+        let encoded_args = encode(&args);
+        let value = fields.value;
+        let mut payload_bytes = Vec::new();
+        payload_bytes.extend_from_slice(selector);
+        payload_bytes.extend_from_slice(&encoded_args);
+        let payload = format!("0x{}", hex::encode(payload_bytes));
+
+        let mut value_bytes = [0u8; 32];
+        value.to_big_endian(&mut value_bytes);
+
+        let voucher = CmaVoucher {
+            destination: format!("{}", token),
+            value: format!("0x{}", hex::encode(value_bytes)),
+            payload: format!("{}", payload),
+        };
+        return Ok(voucher);
+    } else {
+        Err(CmaParserError::Message( String::from("Invalid voucher fields for ERC20")))
+    }
+}
+
+fn handle_erc721_voucher_encoding(voucher_request: &CmaParserVoucherData) -> Result<CmaVoucher, CmaParserError> {
+    if let CmaVoucherFieldType::Erc721VoucherFields(fields) = &voucher_request.voucher_fields {
+        let token = fields.token;
+
+        let args: Vec<Token> = vec![
+            Token::Address(fields.application_address),
+            Token::Address(fields.receiver),
+            Token::Uint(fields.token_id.into()),
+        ];
+        let function_sig = "transferFrom(address,address,uint256)";
+        let selector = &id(function_sig)[..4];
+        let encoded_args = encode(&args);
+        let value = fields.value;
+        let mut payload_bytes = Vec::new();
+        payload_bytes.extend_from_slice(selector);
+        payload_bytes.extend_from_slice(&encoded_args);
+        let payload = format!("0x{}", hex::encode(payload_bytes));
+
+        let mut value_bytes = [0u8; 32];
+        value.to_big_endian(&mut value_bytes);
+
+        let voucher = CmaVoucher {
+            destination: format!("{}", token),
+            value: format!("0x{}", hex::encode(value_bytes)),
+            payload: format!("{}", payload),
+        };
+
+        return Ok(voucher);
+    } else {
+        Err(CmaParserError::Message( String::from("Invalid voucher fields for ERC721")))
+    }
+}
+
+pub fn cma_encode_voucher (req_type: CmaParserVoucherType, voucher_request: CmaParserVoucherData ) -> Result<CmaVoucher, CmaParserError> {
+    match req_type {
+        CmaParserVoucherType::CmaParserVoucherTypeEther => {
+            return handle_ether_voucher_encoding(&voucher_request);
+        },
+        CmaParserVoucherType::CmaParserVoucherTypeErc20 => {
+            return handle_erc20_voucher_encoding(&voucher_request);
+        },
+        CmaParserVoucherType::CmaParserVoucherTypeErc721 => {
+            return handle_erc721_voucher_encoding(&voucher_request);
+        },
+        CmaParserVoucherType::CmaParserVoucherTypeErc1155Single => {
+            // Implement encoding logic for ERC1155 Single voucher
+            return Err(CmaParserError::Message( String::from("Not Implemented yet")))
+        },
+        CmaParserVoucherType::CmaParserVoucherTypeErc1155Batch => {
+            // Implement encoding logic for ERC1155 Batch voucher
+            return Err(CmaParserError::Message( String::from("Not Implemented yet")))
+        },
+        CmaParserVoucherType::CmaParserVoucherTypeNone => {
+            return Err(CmaParserError::Message( String::from("Not Implemented yet")))
+        }
+    }
+}
