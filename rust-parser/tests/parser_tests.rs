@@ -1,4 +1,6 @@
-use rust_parser::parser::{CmaParserInputData, CmaParserInputType, cma_decode_advance};
+use ethers::abi::{Token, encode};
+use ethers::utils::id;
+use rust_parser::parser::{CmaParserErc20VoucherFields, CmaParserErc721VoucherFields, CmaParserEtherVoucherFields, CmaParserInputData, CmaParserInputType, CmaParserVoucherData, CmaParserVoucherType, CmaVoucherFieldType, cma_decode_advance, cma_decode_inspect, cma_encode_voucher };
 use rust_parser::helpers::{CARTESI_ADDRESSES, Portals, PortalMatcher};
 use json::JsonValue;
 use ethers::types::{Address, U256};
@@ -284,6 +286,194 @@ fn test_erc721_transfer_success() {
         Err(e) => panic!("Expected success, got error: {:?}", e),
     }
 }
+
+
+#[test]
+fn test_ether_voucher_encoding_success() {
+    let receipient_string = "0x3e157927fb178490941bb18adcdc4144e442e32a".to_string();
+    let recipient: Address = "0x3e157927fb178490941bb18adcdc4144e442e32a".parse().unwrap();
+    let amount = U256::from_dec_str("1500000000000000000").unwrap(); // 1.5 Ether in wei
+    let mut expected_value_bytes = [0u8; 32];
+    amount.to_big_endian(&mut expected_value_bytes);
+
+    let request = CmaParserVoucherData{
+        voucher_fields: CmaVoucherFieldType::EtherVoucherFields(CmaParserEtherVoucherFields {
+            receiver: recipient,
+            amount,
+        }),
+    };
+
+    match cma_encode_voucher(CmaParserVoucherType::CmaParserVoucherTypeEther, request, ) {
+        Ok(voucher) => {
+            // Basic checks on the voucher structure
+            assert!(voucher.destination.to_lowercase() == receipient_string, "Incorrect destination address in voucher");
+            assert!(voucher.value == format!("0x{}", hex::encode(expected_value_bytes)), "Incorrect value in voucher");
+            assert!(voucher.payload == "0x", "Payload should be empty for Ether transfer");
+        }
+        Err(e) => panic!("Expected success, got error: {:?}", e),
+    }
+}
+
+#[test]
+fn test_erc20_voucher_encoding_success() {
+    let destination_string = "0xFBdB734EF6a23aD76863CbA6f10d0C5CBBD8342C".to_string();
+    let recipient: Address = "0x3e157927fb178490941bb18adcdc4144e442e32a".parse().unwrap();
+    let token_address: Address = "0xFBdB734EF6a23aD76863CbA6f10d0C5CBBD8342C".parse().unwrap(); // TEST token address
+    let amount = U256::from_dec_str("50000000000000000000").unwrap(); // 50 ERC20 tokens in wei
+    let value = U256::zero(); // Value is typically zero for ERC20 transfers
+
+    let mut expected_value_bytes = [0u8; 32];
+    value.to_big_endian(&mut expected_value_bytes);  
+
+    // Create expected voucher payload
+    let args: Vec<Token> = vec![
+        Token::Address(recipient),
+        Token::Uint(amount),
+    ];
+
+    let function_sig = "transfer(address,uint256)";
+    let selector = &id(function_sig)[..4];
+
+    let encoded_args = encode(&args);
+    let mut payload_bytes = Vec::new();
+    payload_bytes.extend_from_slice(selector);
+    payload_bytes.extend_from_slice(&encoded_args);
+    let payload = format!("0x{}", hex::encode(payload_bytes));
+
+    let request = CmaParserVoucherData{
+        voucher_fields: CmaVoucherFieldType::Erc20VoucherFields(CmaParserErc20VoucherFields{
+            token: token_address,
+            amount,
+            receiver: recipient,
+            value: U256::zero(), // Value is typically zero for ERC20 transfers
+        }),
+    };
+    match cma_encode_voucher(CmaParserVoucherType::CmaParserVoucherTypeErc20, request, ) {
+        Ok(voucher) => {
+            // Basic checks on the voucher structure
+            assert!(voucher.destination.to_lowercase() == destination_string.to_lowercase(), "Incorrect destination address in voucher");
+            assert!(voucher.value == format!("0x{}", hex::encode(expected_value_bytes)), "Incorrect value in voucher");
+            assert!(voucher.payload.to_lowercase() == payload, "Incorrect payload in voucher");
+        }
+        Err(e) => panic!("Expected success, got error: {:?}", e),
+    }
+}  
+
+#[test]
+fn test_erc721_voucher_encoding_success() {
+    let destination_string = "0xBa46623aD94AB45850c4ecbA9555D26328917c3B".to_string();
+    let recipient: Address = "0x3e157927fb178490941bb18adcdc4144e442e32a".parse().unwrap();
+    let application_address: Address = "0xFBdB734EF6a23aD76863CbA6f10d0C5CBBD8342C".parse().unwrap();
+    let token_address: Address = "0xBa46623aD94AB45850c4ecbA9555D26328917c3B".parse().unwrap(); // Sample ERC721 token address
+    let token_id = U256::from_dec_str("1").unwrap(); // Sample token ID
+    let value = U256::zero(); // Value is typically zero for ERC721 transfers
+
+    let mut expected_value_bytes = [0u8; 32];
+    value.to_big_endian(&mut expected_value_bytes);  
+
+    // Create expected voucher payload
+    let args: Vec<Token> = vec![
+        Token::Address(application_address),
+        Token::Address(recipient),
+        Token::Uint(token_id),
+    ];
+
+    let function_sig = "transferFrom(address,address,uint256)";
+    let selector = &id(function_sig)[..4];
+
+    let encoded_args = encode(&args);
+    let mut payload_bytes = Vec::new();
+    payload_bytes.extend_from_slice(selector);
+    payload_bytes.extend_from_slice(&encoded_args);
+    let payload = format!("0x{}", hex::encode(payload_bytes));
+
+    println!("Expected payload: {}", payload);
+
+    let request = CmaParserVoucherData{
+        voucher_fields: CmaVoucherFieldType::Erc721VoucherFields(CmaParserErc721VoucherFields{
+            token: token_address,
+            token_id,
+            receiver: recipient,
+            value: U256::zero(), // Value is typically zero for ERC721 transfers
+            application_address
+        }),
+    };
+    match cma_encode_voucher(CmaParserVoucherType::CmaParserVoucherTypeErc721, request, ) {
+        Ok(voucher) => {
+            // Basic checks on the voucher structure
+            assert!(voucher.destination.to_lowercase() == destination_string.to_lowercase(), "Incorrect destination address in voucher");
+            assert!(voucher.value == format!("0x{}", hex::encode(expected_value_bytes)), "Incorrect value in voucher");
+            assert!(voucher.payload.to_lowercase() == payload, "Incorrect payload in voucher");
+        }
+        Err(e) => panic!("Expected success, got error: {:?}", e),
+    }
+}
+
+
+#[test]
+fn test_ledger_get_balance_success() {
+    let address: Address = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266".parse().unwrap();
+    let erc20_token: Address = "0xFBdB734EF6a23aD76863CbA6f10d0C5CBBD8342C".parse().unwrap(); // TEST token address
+    let payload = r#"{"method": "ledgerGetBalance", "params": ["0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266", "0xFBdB734EF6a23aD76863CbA6f10d0C5CBBD8342C", [1,2]]}"#.to_string();
+    let payload_hex = hex::encode(payload.as_bytes());
+
+    let input = create_test_input(&address.to_string(), &payload_hex);   
+
+    match cma_decode_inspect(input) {
+        Ok(result) => {
+            let is_correct_method = result.req_type == CmaParserInputType::CmaParserInputTypeBalance;
+            let is_correct_address = if let CmaParserInputData::Balance(data) = result.input {
+
+                if data.account == address && data.token == erc20_token && data.token_ids == Some(vec![U256::from(1), U256::from(2)]) {
+                    true
+                } else {
+                    false
+                }
+                
+            } else {
+                false
+            };
+
+            assert_eq!(true, is_correct_method, "Expected Ledger Get Balance method");
+            assert_eq!(true, is_correct_address, "Expected correct address");
+
+        }
+        Err(e) => panic!("Expected success, got error: {:?}", e),
+    }
+}
+
+#[test]
+fn test_ledger_get_total_supply_success() {
+    let address: Address = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266".parse().unwrap();
+    let erc20_token: Address = "0xFBdB734EF6a23aD76863CbA6f10d0C5CBBD8342C".parse().unwrap(); // TEST token address
+    let payload = r#"{"method": "ledgerGetTotalSupply", "params": ["0xFBdB734EF6a23aD76863CbA6f10d0C5CBBD8342C", [1,2]]}"#.to_string();
+    let payload_hex = hex::encode(payload.as_bytes());
+    let input = create_test_input(&address.to_string(), &payload_hex);
+
+    match cma_decode_inspect(input) {
+        Ok(result) => {
+            let is_correct_method = result.req_type == CmaParserInputType::CmaParserInputTypeSupply;
+            let is_correct_address = if let CmaParserInputData::Supply(data) = result.input {
+                if data.token == erc20_token && data.token_ids == vec![U256::from(1), U256::from(2)] {
+                    true
+                } else {
+                    false
+                }
+                
+            } else {
+                false
+            };
+
+            assert_eq!(true, is_correct_method, "Expected Ledger Get Total Supply method");
+            assert_eq!(true, is_correct_address, "Expected correct address and ID's");
+
+        }
+        Err(e) => panic!("Expected success, got error: {:?}", e),
+    }
+
+}
+
+
 
 // #[test]
 // fn test_ether_deposit_invalid_payload_length() {
