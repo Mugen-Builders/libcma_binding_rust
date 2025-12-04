@@ -1,7 +1,8 @@
 use crate::helpers::{hex_to_string, PortalMatcher, Portals, CARTESI_ADDRESSES};
-use ethers::abi::{encode, Token};
-use ethers::types::{Address, Bytes, U256};
-use ethers::utils::{id, to_checksum};
+use ethers_core::abi::{encode, Token};
+use ethers_core::types::{Address, Bytes, U256};
+use ethers_core::utils::{id, to_checksum};
+
 use hex;
 use json::JsonValue;
 

@@ -4,9 +4,9 @@ use cma_rust_parser::parser::{
     CmaParserErc721VoucherFields, CmaParserEtherVoucherFields, CmaParserInputData,
     CmaParserInputType, CmaParserVoucherData, CmaParserVoucherType, CmaVoucherFieldType,
 };
-use ethers::abi::{encode, Token};
-use ethers::types::{Address, U256};
-use ethers::utils::id;
+use ethers_core::abi::{encode, Token};
+use ethers_core::types::{Address, U256};
+use ethers_core::utils::{id};
 use json::JsonValue;
 
 // Helper to create a basic JsonValue input structure
