@@ -1,2 +1,6 @@
 */target/
 /target
+.cartesi/
+.idea/
+.vscode/
+.DS_Store

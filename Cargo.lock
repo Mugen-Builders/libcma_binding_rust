@@ -297,6 +297,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cma-rust-parser"
+version = "0.1.0"
+dependencies = [
+ "ethers",
+ "hex",
+ "json",
+ "once_cell",
+]
+
+[[package]]
 name = "coins-bip32"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2485,16 +2495,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 1.0.109",
-]
-
-[[package]]
-name = "rust-parser"
-version = "0.1.0"
-dependencies = [
- "ethers",
- "hex",
- "json",
- "once_cell",
 ]
 
 [[package]]

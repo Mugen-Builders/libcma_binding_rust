@@ -1,10 +1,9 @@
-use crate::types::*;
-use ethers::types::{Address, U256, Bytes};
-use ethers::abi::{Token, encode};
+use crate::helpers::{hex_to_string, PortalMatcher, Portals, CARTESI_ADDRESSES};
+use ethers::abi::{encode, Token};
+use ethers::types::{Address, Bytes, U256};
 use ethers::utils::{id, to_checksum};
-use json::{JsonValue};
 use hex;
-use crate::helpers::{hex_to_string, CARTESI_ADDRESSES, Portals, PortalMatcher};
+use json::JsonValue;
 
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,8 +87,12 @@ impl CmaParserInputType {
             "EtherWithdrawal" => CmaParserInputType::CmaParserInputTypeEtherWithdrawal,
             "Erc20Withdrawal" => CmaParserInputType::CmaParserInputTypeErc20Withdrawal,
             "Erc721Withdrawal" => CmaParserInputType::CmaParserInputTypeErc721Withdrawal,
-            "Erc1155SingleWithdrawal" => CmaParserInputType::CmaParserInputTypeErc1155SingleWithdrawal,
-            "Erc1155BatchWithdrawal" => CmaParserInputType::CmaParserInputTypeErc1155BatchWithdrawal,
+            "Erc1155SingleWithdrawal" => {
+                CmaParserInputType::CmaParserInputTypeErc1155SingleWithdrawal
+            }
+            "Erc1155BatchWithdrawal" => {
+                CmaParserInputType::CmaParserInputTypeErc1155BatchWithdrawal
+            }
             "EtherTransfer" => CmaParserInputType::CmaParserInputTypeEtherTransfer,
             "Erc20Transfer" => CmaParserInputType::CmaParserInputTypeErc20Transfer,
             "Erc721Transfer" => CmaParserInputType::CmaParserInputTypeErc721Transfer,
@@ -128,17 +131,17 @@ impl CmaParserError {
             -2002 => Self::MalformedInput,
             -2003 => Self::Unknown,
             -2004 => Self::Message("Unknown error".to_string()),
-            _ => Self::Unknown, 
+            _ => Self::Unknown,
         }
     }
-    
+
     pub fn to_code(self) -> i32 {
         match self {
             Self::Success => 0,
             Self::IncompatibleInput => -2001,
             Self::MalformedInput => -2002,
             Self::Unknown => -2003,
-            Self::Message(_) => -2004
+            Self::Message(_) => -2004,
         }
     }
 }
@@ -338,20 +341,24 @@ pub enum CmaParserInputData {
     Supply(CmaParserSupply),
 }
 
-
 pub struct CmaParserInput {
     pub req_type: CmaParserInputType,
     pub input: CmaParserInputData,
 }
 
 fn handle_parse_ether_deposit(input: JsonValue) -> Result<CmaParserInputData, CmaParserError> {
-    let payload_hex = input["data"]["payload"].as_str().ok_or(CmaParserError::Message(String::from("Invalid payload hex")))?;
+    let payload_hex = input["data"]["payload"]
+        .as_str()
+        .ok_or(CmaParserError::Message(String::from("Invalid payload hex")))?;
     let payload = payload_hex.trim_start_matches("0x");
 
-    let bytes = hex::decode(payload).map_err(|e| CmaParserError::Message(format!("hex decode error: {}", e)))?;
+    let bytes = hex::decode(payload)
+        .map_err(|e| CmaParserError::Message(format!("hex decode error: {}", e)))?;
 
     if bytes.len() < 20 + 32 {
-        return Err(CmaParserError::Message("Invalid payload length".to_string()));
+        return Err(CmaParserError::Message(
+            "Invalid payload length".to_string(),
+        ));
     }
 
     let sender_bytes = &bytes[0..20];
@@ -369,14 +376,22 @@ fn handle_parse_ether_deposit(input: JsonValue) -> Result<CmaParserInputData, Cm
     }))
 }
 
-fn handle_parse_erc20_and_erc721_deposit(input: JsonValue, t_type: TokenType) -> Result<CmaParserInputData, CmaParserError> {
-    let payload_hex = input["data"]["payload"].as_str().ok_or(CmaParserError::Message(String::from("Invalid payload hex")))?;
+fn handle_parse_erc20_and_erc721_deposit(
+    input: JsonValue,
+    t_type: TokenType,
+) -> Result<CmaParserInputData, CmaParserError> {
+    let payload_hex = input["data"]["payload"]
+        .as_str()
+        .ok_or(CmaParserError::Message(String::from("Invalid payload hex")))?;
     let payload = payload_hex.trim_start_matches("0x");
 
-    let bytes = hex::decode(payload).map_err(|e| CmaParserError::Message(format!("hex decode error: {}", e)))?;
+    let bytes = hex::decode(payload)
+        .map_err(|e| CmaParserError::Message(format!("hex decode error: {}", e)))?;
 
     if bytes.len() < 20 + 20 + 32 {
-        return Err(CmaParserError::Message("Invalid payload length".to_string()));
+        return Err(CmaParserError::Message(
+            "Invalid payload length".to_string(),
+        ));
     }
 
     let token = &bytes[0..20];
@@ -397,18 +412,25 @@ fn handle_parse_erc20_and_erc721_deposit(input: JsonValue, t_type: TokenType) ->
             token: Address::from_slice(token),
             token_id: amount,
             exec_layer_data,
-        }))
+        })),
     }
 }
 
-fn handle_parse_erc1155_single_deposit(input: JsonValue) -> Result<CmaParserInputData, CmaParserError> {
-    let payload_hex = input["data"]["payload"].as_str().ok_or(CmaParserError::Message(String::from("Invalid payload hex")))?;
+fn handle_parse_erc1155_single_deposit(
+    input: JsonValue,
+) -> Result<CmaParserInputData, CmaParserError> {
+    let payload_hex = input["data"]["payload"]
+        .as_str()
+        .ok_or(CmaParserError::Message(String::from("Invalid payload hex")))?;
     let payload = payload_hex.trim_start_matches("0x");
 
-    let bytes = hex::decode(payload).map_err(|e| CmaParserError::Message(format!("hex decode error: {}", e)))?;
+    let bytes = hex::decode(payload)
+        .map_err(|e| CmaParserError::Message(format!("hex decode error: {}", e)))?;
 
     if bytes.len() < 20 + 20 + 32 + 32 {
-        return Err(CmaParserError::Message("Invalid payload length".to_string()));
+        return Err(CmaParserError::Message(
+            "Invalid payload length".to_string(),
+        ));
     }
 
     let token = &bytes[0..20];
@@ -420,61 +442,69 @@ fn handle_parse_erc1155_single_deposit(input: JsonValue) -> Result<CmaParserInpu
     let _base_layer_data = Bytes::from(bytes[104..136].to_vec());
     let exec_layer_data = Bytes::from(bytes[136..].to_vec());
 
-    Ok(CmaParserInputData::Erc1155SingleDeposit(CmaParserErc1155SingleDeposit {
-        sender: Address::from_slice(sender),
-        token: Address::from_slice(token),
-        token_id,
-        amount,
-        exec_layer_data,
-    }) )
+    Ok(CmaParserInputData::Erc1155SingleDeposit(
+        CmaParserErc1155SingleDeposit {
+            sender: Address::from_slice(sender),
+            token: Address::from_slice(token),
+            token_id,
+            amount,
+            exec_layer_data,
+        },
+    ))
 }
 
-
-fn handle_parse_erc1155_batch_deposit(input: JsonValue) -> Result<CmaParserInputData, CmaParserError> {
-    let payload_hex = input["data"]["payload"].as_str().ok_or(CmaParserError::Message(String::from("Invalid payload hex")))?;
+fn handle_parse_erc1155_batch_deposit(
+    input: JsonValue,
+) -> Result<CmaParserInputData, CmaParserError> {
+    let payload_hex = input["data"]["payload"]
+        .as_str()
+        .ok_or(CmaParserError::Message(String::from("Invalid payload hex")))?;
     let payload = payload_hex.trim_start_matches("0x");
 
-    let bytes = hex::decode(payload).map_err(|e| CmaParserError::Message(format!("hex decode error: {}", e)))?;
+    let bytes = hex::decode(payload)
+        .map_err(|e| CmaParserError::Message(format!("hex decode error: {}", e)))?;
 
     if bytes.len() < 20 + 20 + 32 + 32 + 32 {
-        return Err(CmaParserError::Message("Invalid payload length".to_string()));
+        return Err(CmaParserError::Message(
+            "Invalid payload length".to_string(),
+        ));
     }
 
     let u256_from = |b: &[u8]| U256::from_big_endian(b);
     let as_addr = |b: &[u8]| Address::from_slice(&b[12..32]);
 
-    let token   = as_addr(&bytes[0..32]);
-    let sender  = as_addr(&bytes[32..64]);
+    let token = as_addr(&bytes[0..32]);
+    let sender = as_addr(&bytes[32..64]);
 
     let token_ids_offset = u256_from(&bytes[64..96]).as_usize();
-    let values_offset    = u256_from(&bytes[96..128]).as_usize();
-    let base_offset      = u256_from(&bytes[128..160]).as_usize();
-    let exec_offset      = u256_from(&bytes[160..192]).as_usize();
+    let values_offset = u256_from(&bytes[96..128]).as_usize();
+    let base_offset = u256_from(&bytes[128..160]).as_usize();
+    let exec_offset = u256_from(&bytes[160..192]).as_usize();
 
-    let token_ids_len = u256_from(&bytes[token_ids_offset..token_ids_offset+32]).as_usize();
+    let token_ids_len = u256_from(&bytes[token_ids_offset..token_ids_offset + 32]).as_usize();
     let mut token_ids = Vec::with_capacity(token_ids_len);
 
     let mut cursor = token_ids_offset + 32;
     for _ in 0..token_ids_len {
-        token_ids.push(u256_from(&bytes[cursor..cursor+32]));
+        token_ids.push(u256_from(&bytes[cursor..cursor + 32]));
         cursor += 32;
     }
 
-    let values_len = u256_from(&bytes[values_offset..values_offset+32]).as_usize();
+    let values_len = u256_from(&bytes[values_offset..values_offset + 32]).as_usize();
     let mut values = Vec::with_capacity(values_len);
 
     let mut cursor2 = values_offset + 32;
     for _ in 0..values_len {
-        values.push(u256_from(&bytes[cursor2..cursor2+32]));
+        values.push(u256_from(&bytes[cursor2..cursor2 + 32]));
         cursor2 += 32;
     }
 
-    let base_len = u256_from(&bytes[base_offset..base_offset+32]).as_usize();
+    let base_len = u256_from(&bytes[base_offset..base_offset + 32]).as_usize();
     let base_start = base_offset + 32;
     let base_end = base_start + base_len;
     let base_layer_data = Bytes::from(bytes[base_start..base_end].to_vec());
 
-    let exec_len = u256_from(&bytes[exec_offset..exec_offset+32]).as_usize();
+    let exec_len = u256_from(&bytes[exec_offset..exec_offset + 32]).as_usize();
     let exec_start = exec_offset + 32;
     let exec_end = exec_start + exec_len;
     let exec_layer_data = Bytes::from(bytes[exec_start..exec_end].to_vec());
@@ -483,101 +513,185 @@ fn handle_parse_erc1155_batch_deposit(input: JsonValue) -> Result<CmaParserInput
         return Err(CmaParserError::Message("Invalid payload data".to_string()));
     }
 
-    Ok(CmaParserInputData::Erc1155BatchDeposit(CmaParserErc1155BatchDeposit {
-        sender,
-        token,
-        count: token_ids_len,
-        token_ids,
-        amounts: values,
-        base_layer_data,
-        exec_layer_data,
-    }))
+    Ok(CmaParserInputData::Erc1155BatchDeposit(
+        CmaParserErc1155BatchDeposit {
+            sender,
+            token,
+            count: token_ids_len,
+            token_ids,
+            amounts: values,
+            base_layer_data,
+            exec_layer_data,
+        },
+    ))
 }
 
 fn handle_ether_withdrawal(input: JsonValue) -> Result<CmaParserInputData, CmaParserError> {
-    let payload_hex = input["data"]["payload"].as_str().ok_or(CmaParserError::Message(String::from("Invalid payload hex")))?;
-    let payload_str = hex_to_string(payload_hex).map_err(|e| CmaParserError::Message(format!("hex to string conversion error: {}", e)))?;
-    let msg_sender = input["data"]["metadata"]["msg_sender"].as_str().ok_or(CmaParserError::Message(String::from("Invalid msg_sender address")))?;
+    let payload_hex = input["data"]["payload"]
+        .as_str()
+        .ok_or(CmaParserError::Message(String::from("Invalid payload hex")))?;
+    let payload_str = hex_to_string(payload_hex)
+        .map_err(|e| CmaParserError::Message(format!("hex to string conversion error: {}", e)))?;
+    let msg_sender =
+        input["data"]["metadata"]["msg_sender"]
+            .as_str()
+            .ok_or(CmaParserError::Message(String::from(
+                "Invalid msg_sender address",
+            )))?;
 
     match json::parse(&payload_str) {
         Ok(parsed_json) => {
-            let receiver = msg_sender.parse::<Address>().map_err(|e| CmaParserError::Message(format!("msg_sender address error: {}", e)))?;
-            let amount_str = parsed_json["amount"].as_str().ok_or(CmaParserError::Message(String::from("Invalid amount")))?;
-            let amount = U256::from_dec_str(amount_str).map_err(|e| CmaParserError::Message(format!("amount parse error: {}", e)))?;
+            let receiver = msg_sender
+                .parse::<Address>()
+                .map_err(|e| CmaParserError::Message(format!("msg_sender address error: {}", e)))?;
+            let amount_str = parsed_json["amount"]
+                .as_str()
+                .ok_or(CmaParserError::Message(String::from("Invalid amount")))?;
+            let amount = U256::from_dec_str(amount_str)
+                .map_err(|e| CmaParserError::Message(format!("amount parse error: {}", e)))?;
             let exec_layer_data = parsed_json["exec_layer_data"].to_string();
 
-            Ok(CmaParserInputData::EtherWithdrawal(CmaParserEtherWithdrawal {
-                receiver,
-                amount,
-                exec_layer_data,
-            }))
-        },
-        Err(_) => Err(CmaParserError::Message( String::from("Failed to parse JSON payload") )),
+            Ok(CmaParserInputData::EtherWithdrawal(
+                CmaParserEtherWithdrawal {
+                    receiver,
+                    amount,
+                    exec_layer_data,
+                },
+            ))
+        }
+        Err(_) => Err(CmaParserError::Message(String::from(
+            "Failed to parse JSON payload",
+        ))),
     }
 }
 
 fn handle_erc20_withdrawal(input: JsonValue) -> Result<CmaParserInputData, CmaParserError> {
-    let payload_hex = input["data"]["payload"].as_str().ok_or(CmaParserError::Message(String::from("Invalid payload hex")))?;
-    let payload_str = hex_to_string(payload_hex).map_err(|e| CmaParserError::Message(format!("hex to string conversion error: {}", e)))?;
-    let msg_sender = input["data"]["metadata"]["msg_sender"].as_str().ok_or(CmaParserError::Message(String::from("Invalid msg_sender address")))?;
+    let payload_hex = input["data"]["payload"]
+        .as_str()
+        .ok_or(CmaParserError::Message(String::from("Invalid payload hex")))?;
+    let payload_str = hex_to_string(payload_hex)
+        .map_err(|e| CmaParserError::Message(format!("hex to string conversion error: {}", e)))?;
+    let msg_sender =
+        input["data"]["metadata"]["msg_sender"]
+            .as_str()
+            .ok_or(CmaParserError::Message(String::from(
+                "Invalid msg_sender address",
+            )))?;
 
     match json::parse(&payload_str) {
         Ok(parsed_json) => {
-            let receiver = msg_sender.parse::<Address>().map_err(|e| CmaParserError::Message(format!("msg_sender address error: {}", e)))?;
-            let token_str = parsed_json["token"].as_str().ok_or(CmaParserError::Message(String::from("Invalid token address")))?;
-            let token = token_str.parse::<Address>().map_err(|e| CmaParserError::Message(format!("token address error: {}", e)))?;
-            let amount_str = parsed_json["amount"].as_str().ok_or(CmaParserError::Message(String::from("Invalid amount")))?;
-            let amount = U256::from_dec_str(amount_str).map_err(|e| CmaParserError::Message(format!("amount parse error: {}", e)))?;
+            let receiver = msg_sender
+                .parse::<Address>()
+                .map_err(|e| CmaParserError::Message(format!("msg_sender address error: {}", e)))?;
+            let token_str = parsed_json["token"]
+                .as_str()
+                .ok_or(CmaParserError::Message(String::from(
+                    "Invalid token address",
+                )))?;
+            let token = token_str
+                .parse::<Address>()
+                .map_err(|e| CmaParserError::Message(format!("token address error: {}", e)))?;
+            let amount_str = parsed_json["amount"]
+                .as_str()
+                .ok_or(CmaParserError::Message(String::from("Invalid amount")))?;
+            let amount = U256::from_dec_str(amount_str)
+                .map_err(|e| CmaParserError::Message(format!("amount parse error: {}", e)))?;
             let exec_layer_data = parsed_json["exec_layer_data"].to_string();
 
-            Ok(CmaParserInputData::Erc20Withdrawal(CmaParserErc20Withdrawal {
-                receiver,
-                token,
-                amount,
-                exec_layer_data,
-            }))
-        },
-        Err(_) => Err(CmaParserError::Message( String::from("Failed to parse JSON payload") )),
+            Ok(CmaParserInputData::Erc20Withdrawal(
+                CmaParserErc20Withdrawal {
+                    receiver,
+                    token,
+                    amount,
+                    exec_layer_data,
+                },
+            ))
+        }
+        Err(_) => Err(CmaParserError::Message(String::from(
+            "Failed to parse JSON payload",
+        ))),
     }
 }
 
 fn handle_erc721_withdrawal(input: JsonValue) -> Result<CmaParserInputData, CmaParserError> {
-    let payload_hex = input["data"]["payload"].as_str().ok_or(CmaParserError::Message(String::from("Invalid payload hex")))?;
-    let payload_str = hex_to_string(payload_hex).map_err(|e| CmaParserError::Message(format!("hex to string conversion error: {}", e)))?;
-    let msg_sender = input["data"]["metadata"]["msg_sender"].as_str().ok_or(CmaParserError::Message(String::from("Invalid msg_sender address")))?;
+    let payload_hex = input["data"]["payload"]
+        .as_str()
+        .ok_or(CmaParserError::Message(String::from("Invalid payload hex")))?;
+    let payload_str = hex_to_string(payload_hex)
+        .map_err(|e| CmaParserError::Message(format!("hex to string conversion error: {}", e)))?;
+    let msg_sender =
+        input["data"]["metadata"]["msg_sender"]
+            .as_str()
+            .ok_or(CmaParserError::Message(String::from(
+                "Invalid msg_sender address",
+            )))?;
 
     match json::parse(&payload_str) {
         Ok(parsed_json) => {
-            let receiver = msg_sender.parse::<Address>().map_err(|e| CmaParserError::Message(format!("msg_sender address error: {}", e)))?;
-            let token_str = parsed_json["token"].as_str().ok_or(CmaParserError::Message(String::from("Invalid token address")))?;
-            let token = token_str.parse::<Address>().map_err(|e| CmaParserError::Message(format!("token address error: {}", e)))?;
-            let token_id_str = parsed_json["id"].as_str().ok_or(CmaParserError::Message(String::from("Invalid token id")))?;
-            let token_id = U256::from_dec_str(token_id_str).map_err(|e| CmaParserError::Message(format!("token id parse error: {}", e)))?;
+            let receiver = msg_sender
+                .parse::<Address>()
+                .map_err(|e| CmaParserError::Message(format!("msg_sender address error: {}", e)))?;
+            let token_str = parsed_json["token"]
+                .as_str()
+                .ok_or(CmaParserError::Message(String::from(
+                    "Invalid token address",
+                )))?;
+            let token = token_str
+                .parse::<Address>()
+                .map_err(|e| CmaParserError::Message(format!("token address error: {}", e)))?;
+            let token_id_str = parsed_json["id"]
+                .as_str()
+                .ok_or(CmaParserError::Message(String::from("Invalid token id")))?;
+            let token_id = U256::from_dec_str(token_id_str)
+                .map_err(|e| CmaParserError::Message(format!("token id parse error: {}", e)))?;
             let exec_layer_data = parsed_json["exec_layer_data"].to_string();
 
-            Ok(CmaParserInputData::Erc721Withdrawal(CmaParserErc721Withdrawal {
-                receiver,
-                token,
-                token_id,
-                exec_layer_data,
-            }))
-        },
-        Err(_) => Err(CmaParserError::Message( String::from("Failed to parse JSON payload") )),
+            Ok(CmaParserInputData::Erc721Withdrawal(
+                CmaParserErc721Withdrawal {
+                    receiver,
+                    token,
+                    token_id,
+                    exec_layer_data,
+                },
+            ))
+        }
+        Err(_) => Err(CmaParserError::Message(String::from(
+            "Failed to parse JSON payload",
+        ))),
     }
 }
 
 fn handle_ether_transfer(input: JsonValue) -> Result<CmaParserInputData, CmaParserError> {
-    let payload_hex = input["data"]["payload"].as_str().ok_or(CmaParserError::Message(String::from("Invalid payload hex")))?;
-    let payload_str = hex_to_string(payload_hex).map_err(|e| CmaParserError::Message(format!("hex to string conversion error: {}", e)))?;
-    let msg_sender = input["data"]["metadata"]["msg_sender"].as_str().ok_or(CmaParserError::Message(String::from("Invalid msg_sender address")))?;
+    let payload_hex = input["data"]["payload"]
+        .as_str()
+        .ok_or(CmaParserError::Message(String::from("Invalid payload hex")))?;
+    let payload_str = hex_to_string(payload_hex)
+        .map_err(|e| CmaParserError::Message(format!("hex to string conversion error: {}", e)))?;
+    let msg_sender =
+        input["data"]["metadata"]["msg_sender"]
+            .as_str()
+            .ok_or(CmaParserError::Message(String::from(
+                "Invalid msg_sender address",
+            )))?;
 
     match json::parse(&payload_str) {
         Ok(parsed_json) => {
-            let sender = msg_sender.parse::<Address>().map_err(|e| CmaParserError::Message(format!("msg_sender address error: {}", e)))?;
-            let receiver_str = parsed_json["receiver"].as_str().ok_or(CmaParserError::Message(String::from("Invalid receiver address")))?;
-            let receiver = receiver_str.parse::<Address>().map_err(|e| CmaParserError::Message(format!("receiver address error: {}", e)))?;
-            let amount_str = parsed_json["amount"].as_str().ok_or(CmaParserError::Message(String::from("Invalid amount")))?;
-            let amount = U256::from_dec_str(amount_str).map_err(|e| CmaParserError::Message(format!("amount parse error: {}", e)))?;
+            let sender = msg_sender
+                .parse::<Address>()
+                .map_err(|e| CmaParserError::Message(format!("msg_sender address error: {}", e)))?;
+            let receiver_str = parsed_json["receiver"]
+                .as_str()
+                .ok_or(CmaParserError::Message(String::from(
+                    "Invalid receiver address",
+                )))?;
+            let receiver = receiver_str
+                .parse::<Address>()
+                .map_err(|e| CmaParserError::Message(format!("receiver address error: {}", e)))?;
+            let amount_str = parsed_json["amount"]
+                .as_str()
+                .ok_or(CmaParserError::Message(String::from("Invalid amount")))?;
+            let amount = U256::from_dec_str(amount_str)
+                .map_err(|e| CmaParserError::Message(format!("amount parse error: {}", e)))?;
             let exec_layer_data = parsed_json["exec_layer_data"].to_string();
 
             Ok(CmaParserInputData::EtherTransfer(CmaParserEtherTransfer {
@@ -586,26 +700,52 @@ fn handle_ether_transfer(input: JsonValue) -> Result<CmaParserInputData, CmaPars
                 amount,
                 exec_layer_data,
             }))
-        },
-        Err(_) => Err(CmaParserError::Message( String::from("Failed to parse JSON payload") )),
+        }
+        Err(_) => Err(CmaParserError::Message(String::from(
+            "Failed to parse JSON payload",
+        ))),
     }
-
 }
 
 fn handle_erc20_transfer(input: JsonValue) -> Result<CmaParserInputData, CmaParserError> {
-    let payload_hex = input["data"]["payload"].as_str().ok_or(CmaParserError::Message(String::from("Invalid payload hex")))?;
-    let payload_str = hex_to_string(payload_hex).map_err(|e| CmaParserError::Message(format!("hex to string conversion error: {}", e)))?;
-    let msg_sender = input["data"]["metadata"]["msg_sender"].as_str().ok_or(CmaParserError::Message(String::from("Invalid msg_sender address")))?;
+    let payload_hex = input["data"]["payload"]
+        .as_str()
+        .ok_or(CmaParserError::Message(String::from("Invalid payload hex")))?;
+    let payload_str = hex_to_string(payload_hex)
+        .map_err(|e| CmaParserError::Message(format!("hex to string conversion error: {}", e)))?;
+    let msg_sender =
+        input["data"]["metadata"]["msg_sender"]
+            .as_str()
+            .ok_or(CmaParserError::Message(String::from(
+                "Invalid msg_sender address",
+            )))?;
 
     match json::parse(&payload_str) {
         Ok(parsed_json) => {
-            let sender = msg_sender.parse::<Address>().map_err(|e| CmaParserError::Message(format!("msg_sender address error: {}", e)))?;
-            let receiver_str = parsed_json["receiver"].as_str().ok_or(CmaParserError::Message(String::from("Invalid receiver address")))?;
-            let receiver = receiver_str.parse::<Address>().map_err(|e| CmaParserError::Message(format!("receiver address error: {}", e)))?;
-            let token_str = parsed_json["token"].as_str().ok_or(CmaParserError::Message(String::from("Invalid token address")))?;
-            let token = token_str.parse::<Address>().map_err(|e| CmaParserError::Message(format!("token address error: {}", e)))?;
-            let amount_str = parsed_json["amount"].as_str().ok_or(CmaParserError::Message(String::from("Invalid amount")))?;
-            let amount = U256::from_dec_str(amount_str).map_err(|e| CmaParserError::Message(format!("amount parse error: {}", e)))?;
+            let sender = msg_sender
+                .parse::<Address>()
+                .map_err(|e| CmaParserError::Message(format!("msg_sender address error: {}", e)))?;
+            let receiver_str = parsed_json["receiver"]
+                .as_str()
+                .ok_or(CmaParserError::Message(String::from(
+                    "Invalid receiver address",
+                )))?;
+            let receiver = receiver_str
+                .parse::<Address>()
+                .map_err(|e| CmaParserError::Message(format!("receiver address error: {}", e)))?;
+            let token_str = parsed_json["token"]
+                .as_str()
+                .ok_or(CmaParserError::Message(String::from(
+                    "Invalid token address",
+                )))?;
+            let token = token_str
+                .parse::<Address>()
+                .map_err(|e| CmaParserError::Message(format!("token address error: {}", e)))?;
+            let amount_str = parsed_json["amount"]
+                .as_str()
+                .ok_or(CmaParserError::Message(String::from("Invalid amount")))?;
+            let amount = U256::from_dec_str(amount_str)
+                .map_err(|e| CmaParserError::Message(format!("amount parse error: {}", e)))?;
             let exec_layer_data = parsed_json["exec_layer_data"].to_string();
 
             Ok(CmaParserInputData::Erc20Transfer(CmaParserErc20Transfer {
@@ -615,43 +755,77 @@ fn handle_erc20_transfer(input: JsonValue) -> Result<CmaParserInputData, CmaPars
                 amount,
                 exec_layer_data,
             }))
-        },
-        Err(_) => Err(CmaParserError::Message( String::from("Failed to parse JSON payload") )),
+        }
+        Err(_) => Err(CmaParserError::Message(String::from(
+            "Failed to parse JSON payload",
+        ))),
     }
 }
 
 fn handle_erc721_transfer(input: JsonValue) -> Result<CmaParserInputData, CmaParserError> {
-    let payload_hex = input["data"]["payload"].as_str().ok_or(CmaParserError::Message(String::from("Invalid payload hex")))?;
-    let payload_str = hex_to_string(payload_hex).map_err(|e| CmaParserError::Message(format!("hex to string conversion error: {}", e)))?;
-    let msg_sender = input["data"]["metadata"]["msg_sender"].as_str().ok_or(CmaParserError::Message(String::from("Invalid msg_sender address")))?;
+    let payload_hex = input["data"]["payload"]
+        .as_str()
+        .ok_or(CmaParserError::Message(String::from("Invalid payload hex")))?;
+    let payload_str = hex_to_string(payload_hex)
+        .map_err(|e| CmaParserError::Message(format!("hex to string conversion error: {}", e)))?;
+    let msg_sender =
+        input["data"]["metadata"]["msg_sender"]
+            .as_str()
+            .ok_or(CmaParserError::Message(String::from(
+                "Invalid msg_sender address",
+            )))?;
 
     match json::parse(&payload_str) {
         Ok(parsed_json) => {
-            let sender = msg_sender.parse::<Address>().map_err(|e| CmaParserError::Message(format!("msg_sender address error: {}", e)))?;
-            let receiver_str = parsed_json["receiver"].as_str().ok_or(CmaParserError::Message(String::from("Invalid receiver address")))?;
-            let receiver = receiver_str.parse::<Address>().map_err(|e| CmaParserError::Message(format!("receiver address error: {}", e)))?;
-            let token_str = parsed_json["token"].as_str().ok_or(CmaParserError::Message(String::from("Invalid token address")))?;
-            let token = token_str.parse::<Address>().map_err(|e| CmaParserError::Message(format!("token address error: {}", e)))?;
-            let token_id_str = parsed_json["id"].as_str().ok_or(CmaParserError::Message(String::from("Invalid token id")))?;
-            let token_id = U256::from_dec_str(token_id_str).map_err(|e| CmaParserError::Message(format!("token id parse error: {}", e)))?;
+            let sender = msg_sender
+                .parse::<Address>()
+                .map_err(|e| CmaParserError::Message(format!("msg_sender address error: {}", e)))?;
+            let receiver_str = parsed_json["receiver"]
+                .as_str()
+                .ok_or(CmaParserError::Message(String::from(
+                    "Invalid receiver address",
+                )))?;
+            let receiver = receiver_str
+                .parse::<Address>()
+                .map_err(|e| CmaParserError::Message(format!("receiver address error: {}", e)))?;
+            let token_str = parsed_json["token"]
+                .as_str()
+                .ok_or(CmaParserError::Message(String::from(
+                    "Invalid token address",
+                )))?;
+            let token = token_str
+                .parse::<Address>()
+                .map_err(|e| CmaParserError::Message(format!("token address error: {}", e)))?;
+            let token_id_str = parsed_json["id"]
+                .as_str()
+                .ok_or(CmaParserError::Message(String::from("Invalid token id")))?;
+            let token_id = U256::from_dec_str(token_id_str)
+                .map_err(|e| CmaParserError::Message(format!("token id parse error: {}", e)))?;
             let exec_layer_data = parsed_json["exec_layer_data"].to_string();
 
-            Ok(CmaParserInputData::Erc721Transfer(CmaParserErc721Transfer {
-                sender,
-                receiver,
-                token,
-                token_id,
-                exec_layer_data,
-            }))
-        },
-        Err(_) => Err(CmaParserError::Message( String::from("Failed to parse JSON payload") )),
+            Ok(CmaParserInputData::Erc721Transfer(
+                CmaParserErc721Transfer {
+                    sender,
+                    receiver,
+                    token,
+                    token_id,
+                    exec_layer_data,
+                },
+            ))
+        }
+        Err(_) => Err(CmaParserError::Message(String::from(
+            "Failed to parse JSON payload",
+        ))),
     }
 }
 
-
-
 pub fn cma_decode_advance(input: JsonValue) -> Result<CmaParserInput, CmaParserError> {
-    let msg_sender = input["data"]["metadata"]["msg_sender"].as_str().ok_or(CmaParserError::Message(String::from("Invalid msg_sender address")))?;
+    let msg_sender =
+        input["data"]["metadata"]["msg_sender"]
+            .as_str()
+            .ok_or(CmaParserError::Message(String::from(
+                "Invalid msg_sender address",
+            )))?;
     let req_type: CmaParserInputType;
 
     // Determine the portal type based on msg_sender
@@ -662,44 +836,57 @@ pub fn cma_decode_advance(input: JsonValue) -> Result<CmaParserInput, CmaParserE
                 req_type,
                 input: data,
             });
-        },
+        }
         Portals::ERC1155SinglePortal => {
             req_type = CmaParserInputType::CmaParserInputTypeErc1155SingleDeposit;
             return handle_parse_erc1155_single_deposit(input).map(|data| CmaParserInput {
                 req_type,
                 input: data,
             });
-        },
+        }
         Portals::ERC721Portal => {
             req_type = CmaParserInputType::CmaParserInputTypeErc721Deposit;
-            return handle_parse_erc20_and_erc721_deposit(input, TokenType::Erc721).map(|data| CmaParserInput {
-                req_type,
-                input: data,
+            return handle_parse_erc20_and_erc721_deposit(input, TokenType::Erc721).map(|data| {
+                CmaParserInput {
+                    req_type,
+                    input: data,
+                }
             });
-        },
+        }
         Portals::ERC20Portal => {
             req_type = CmaParserInputType::CmaParserInputTypeErc20Deposit;
-            return handle_parse_erc20_and_erc721_deposit(input, TokenType::Erc20).map(|data| CmaParserInput {
-                req_type,
-                input: data,
+            return handle_parse_erc20_and_erc721_deposit(input, TokenType::Erc20).map(|data| {
+                CmaParserInput {
+                    req_type,
+                    input: data,
+                }
             });
-        },
+        }
         Portals::EtherPortal => {
             req_type = CmaParserInputType::CmaParserInputTypeEtherDeposit;
             return handle_parse_ether_deposit(input).map(|data| CmaParserInput {
                 req_type,
                 input: data,
             });
-        },
+        }
         // IF CALLER IS NOT ANY OF THE ABOVE PORTALS, WE TRY TO PARSE THE PAYLOAD FOR WITHDRAWALS/TRANSFERS
         Portals::None => {
-            let payload_hex = input["data"]["payload"].as_str().ok_or(CmaParserError::Message(String::from("Invalid payload hex")))?;
-            let payload_str = hex_to_string(payload_hex).map_err(|e| CmaParserError::Message(format!("hex to string conversion error: {}", e)))?;
+            let payload_hex = input["data"]["payload"]
+                .as_str()
+                .ok_or(CmaParserError::Message(String::from("Invalid payload hex")))?;
+            let payload_str = hex_to_string(payload_hex).map_err(|e| {
+                CmaParserError::Message(format!("hex to string conversion error: {}", e))
+            })?;
 
             match json::parse(&payload_str) {
                 Ok(parsed_json) => {
-                    let function_type = parsed_json["function_type"].as_str().ok_or(CmaParserError::Message(String::from("Invalid function type")))?;
-                    
+                    let function_type =
+                        parsed_json["function_type"]
+                            .as_str()
+                            .ok_or(CmaParserError::Message(String::from(
+                                "Invalid function type",
+                            )))?;
+
                     // Determine the request type based on function_type
                     req_type = CmaParserInputType::from_string(function_type);
 
@@ -710,42 +897,46 @@ pub fn cma_decode_advance(input: JsonValue) -> Result<CmaParserInput, CmaParserE
                                 req_type,
                                 input: data,
                             });
-                        },
+                        }
 
                         CmaParserInputType::CmaParserInputTypeErc20Withdrawal => {
                             return handle_erc20_withdrawal(input).map(|data| CmaParserInput {
                                 req_type,
                                 input: data,
                             });
-                        },
+                        }
                         CmaParserInputType::CmaParserInputTypeErc721Withdrawal => {
                             return handle_erc721_withdrawal(input).map(|data| CmaParserInput {
                                 req_type,
                                 input: data,
                             });
-                        },
+                        }
                         CmaParserInputType::CmaParserInputTypeEtherTransfer => {
                             return handle_ether_transfer(input).map(|data| CmaParserInput {
                                 req_type,
                                 input: data,
                             });
-                        },
+                        }
                         CmaParserInputType::CmaParserInputTypeErc20Transfer => {
                             return handle_erc20_transfer(input).map(|data| CmaParserInput {
                                 req_type,
                                 input: data,
                             });
-                        },
+                        }
                         CmaParserInputType::CmaParserInputTypeErc721Transfer => {
                             return handle_erc721_transfer(input).map(|data| CmaParserInput {
                                 req_type,
                                 input: data,
                             });
-                        },
+                        }
                         _ => Err(CmaParserError::IncompatibleInput),
                     }
-                },
-                Err(_) => return Err(CmaParserError::Message( String::from("Failed to parse JSON payload") )),
+                }
+                Err(_) => {
+                    return Err(CmaParserError::Message(String::from(
+                        "Failed to parse JSON payload",
+                    )))
+                }
             }
         }
     }
@@ -755,7 +946,9 @@ fn handle_ledger_get_balance(parsed_json: JsonValue) -> Result<CmaParserBalance,
     // Extract params array
     let params_val = &parsed_json["params"];
     if !params_val.is_array() {
-        return Err(CmaParserError::Message("Invalid params: not an array".into()));
+        return Err(CmaParserError::Message(
+            "Invalid params: not an array".into(),
+        ));
     }
 
     // params[0] = account
@@ -763,7 +956,8 @@ fn handle_ledger_get_balance(parsed_json: JsonValue) -> Result<CmaParserBalance,
         .as_str()
         .ok_or_else(|| CmaParserError::Message("Invalid account param".into()))?;
 
-    let account = account_str.parse::<Address>()
+    let account = account_str
+        .parse::<Address>()
         .map_err(|e| CmaParserError::Message(format!("account address error: {}", e)))?;
 
     // params[1] = token
@@ -771,7 +965,8 @@ fn handle_ledger_get_balance(parsed_json: JsonValue) -> Result<CmaParserBalance,
         .as_str()
         .ok_or_else(|| CmaParserError::Message("Invalid token param".into()))?;
 
-    let token = token_str.parse::<Address>()
+    let token = token_str
+        .parse::<Address>()
         .map_err(|e| CmaParserError::Message(format!("token address error: {}", e)))?;
 
     // params[2] = optional array containing token id's
@@ -780,7 +975,9 @@ fn handle_ledger_get_balance(parsed_json: JsonValue) -> Result<CmaParserBalance,
         // params_val[2][0] might itself be an array of ids or params_val[2] might be the array
         if params_val[2][0].is_array() {
             for v in params_val[2][0].members() {
-                let s = v.as_str().ok_or_else(|| CmaParserError::Message("Invalid token id".into()))?;
+                let s = v
+                    .as_str()
+                    .ok_or_else(|| CmaParserError::Message("Invalid token id".into()))?;
                 let id = U256::from_dec_str(s)
                     .map_err(|e| CmaParserError::Message(format!("token id parse error: {}", e)))?;
                 token_id.push(id);
@@ -791,18 +988,21 @@ fn handle_ledger_get_balance(parsed_json: JsonValue) -> Result<CmaParserBalance,
                 if let Some(s) = v.as_str() {
                     if s.contains(',') {
                         for part in s.split(',').map(str::trim).filter(|p| !p.is_empty()) {
-                            let id = U256::from_dec_str(part)
-                                .map_err(|e| CmaParserError::Message(format!("token id parse error: {}", e)))?;
+                            let id = U256::from_dec_str(part).map_err(|e| {
+                                CmaParserError::Message(format!("token id parse error: {}", e))
+                            })?;
                             token_id.push(id);
                         }
                     } else {
-                        let id = U256::from_dec_str(s)
-                            .map_err(|e| CmaParserError::Message(format!("token id parse error: {}", e)))?;
+                        let id = U256::from_dec_str(s).map_err(|e| {
+                            CmaParserError::Message(format!("token id parse error: {}", e))
+                        })?;
                         token_id.push(id);
                     }
                 } else if v.is_number() {
-                    let id = U256::from_dec_str(&v.to_string())
-                        .map_err(|e| CmaParserError::Message(format!("token id parse error: {}", e)))?;
+                    let id = U256::from_dec_str(&v.to_string()).map_err(|e| {
+                        CmaParserError::Message(format!("token id parse error: {}", e))
+                    })?;
                     token_id.push(id);
                 } else {
                     return Err(CmaParserError::Message("Invalid token id format".into()));
@@ -814,7 +1014,7 @@ fn handle_ledger_get_balance(parsed_json: JsonValue) -> Result<CmaParserBalance,
     Ok(CmaParserBalance {
         account,
         token,
-        token_ids: Some(token_id)
+        token_ids: Some(token_id),
     })
 }
 
@@ -822,7 +1022,9 @@ fn handle_ledger_get_supply(parsed_json: JsonValue) -> Result<CmaParserInputData
     // Ensure params is an array
     let params_val = &parsed_json["params"];
     if !params_val.is_array() {
-        return Err(CmaParserError::Message("Invalid params: not an array".into()));
+        return Err(CmaParserError::Message(
+            "Invalid params: not an array".into(),
+        ));
     }
 
     // params[0] = token address string
@@ -830,7 +1032,8 @@ fn handle_ledger_get_supply(parsed_json: JsonValue) -> Result<CmaParserInputData
         .as_str()
         .ok_or_else(|| CmaParserError::Message("Invalid token param".into()))?;
 
-    let token = token_str.parse::<Address>()
+    let token = token_str
+        .parse::<Address>()
         .map_err(|e| CmaParserError::Message(format!("token address error: {}", e)))?;
 
     // params[1] = optional array containing token id's
@@ -839,7 +1042,9 @@ fn handle_ledger_get_supply(parsed_json: JsonValue) -> Result<CmaParserInputData
         // params_val[1][0] might itself be an array of ids or params_val[1] might be the array
         if params_val[1][0].is_array() {
             for v in params_val[1][0].members() {
-                let s = v.as_str().ok_or_else(|| CmaParserError::Message("Invalid token id".into()))?;
+                let s = v
+                    .as_str()
+                    .ok_or_else(|| CmaParserError::Message("Invalid token id".into()))?;
                 let id = U256::from_dec_str(s)
                     .map_err(|e| CmaParserError::Message(format!("token id parse error: {}", e)))?;
                 token_id.push(id);
@@ -850,18 +1055,21 @@ fn handle_ledger_get_supply(parsed_json: JsonValue) -> Result<CmaParserInputData
                 if let Some(s) = v.as_str() {
                     if s.contains(',') {
                         for part in s.split(',').map(str::trim).filter(|p| !p.is_empty()) {
-                            let id = U256::from_dec_str(part)
-                                .map_err(|e| CmaParserError::Message(format!("token id parse error: {}", e)))?;
+                            let id = U256::from_dec_str(part).map_err(|e| {
+                                CmaParserError::Message(format!("token id parse error: {}", e))
+                            })?;
                             token_id.push(id);
                         }
                     } else {
-                        let id = U256::from_dec_str(s)
-                            .map_err(|e| CmaParserError::Message(format!("token id parse error: {}", e)))?;
+                        let id = U256::from_dec_str(s).map_err(|e| {
+                            CmaParserError::Message(format!("token id parse error: {}", e))
+                        })?;
                         token_id.push(id);
                     }
                 } else if v.is_number() {
-                    let id = U256::from_dec_str(&v.to_string())
-                        .map_err(|e| CmaParserError::Message(format!("token id parse error: {}", e)))?;
+                    let id = U256::from_dec_str(&v.to_string()).map_err(|e| {
+                        CmaParserError::Message(format!("token id parse error: {}", e))
+                    })?;
                     token_id.push(id);
                 } else {
                     return Err(CmaParserError::Message("Invalid token id format".into()));
@@ -877,13 +1085,18 @@ fn handle_ledger_get_supply(parsed_json: JsonValue) -> Result<CmaParserInputData
 }
 
 pub fn cma_decode_inspect(input: JsonValue) -> Result<CmaParserInput, CmaParserError> {
-    let payload_hex = input["data"]["payload"].as_str().ok_or(CmaParserError::Message(String::from("Invalid payload hex")))?;
-    let payload_str = hex_to_string(payload_hex).map_err(|e| CmaParserError::Message(format!("hex to string conversion error: {}", e)))?;
-    let payload_json = json::parse(&payload_str).map_err(|e| CmaParserError::Message(format!("Error parsing string to JSON: {}", e)))?;
-    
-    let req_type: CmaParserInputType = CmaParserInputType::from_string(
-        payload_json["method"].as_str().ok_or(CmaParserError::Message(String::from("Invalid inspection type")))?,
-    );
+    let payload_hex = input["data"]["payload"]
+        .as_str()
+        .ok_or(CmaParserError::Message(String::from("Invalid payload hex")))?;
+    let payload_str = hex_to_string(payload_hex)
+        .map_err(|e| CmaParserError::Message(format!("hex to string conversion error: {}", e)))?;
+    let payload_json = json::parse(&payload_str)
+        .map_err(|e| CmaParserError::Message(format!("Error parsing string to JSON: {}", e)))?;
+
+    let req_type: CmaParserInputType =
+        CmaParserInputType::from_string(payload_json["method"].as_str().ok_or(
+            CmaParserError::Message(String::from("Invalid inspection type")),
+        )?);
 
     match req_type {
         CmaParserInputType::CmaParserInputTypeBalance => {
@@ -891,13 +1104,13 @@ pub fn cma_decode_inspect(input: JsonValue) -> Result<CmaParserInput, CmaParserE
                 req_type,
                 input: CmaParserInputData::Balance(data),
             });
-        },
+        }
         CmaParserInputType::CmaParserInputTypeSupply => {
             return handle_ledger_get_supply(payload_json).map(|data| CmaParserInput {
                 req_type,
                 input: data,
             });
-        },
+        }
         _ => {
             // Unsupported inspection type
             return Err(CmaParserError::IncompatibleInput);
@@ -906,38 +1119,35 @@ pub fn cma_decode_inspect(input: JsonValue) -> Result<CmaParserInput, CmaParserE
 }
 
 fn handle_ether_voucher_encoding(
-    voucher_request: &CmaParserVoucherData
-) -> Result<CmaVoucher, CmaParserError> 
-{
+    voucher_request: &CmaParserVoucherData,
+) -> Result<CmaVoucher, CmaParserError> {
     if let CmaVoucherFieldType::EtherVoucherFields(fields) = &voucher_request.voucher_fields {
-
-        let payload = "0x".to_string();  
+        let payload = "0x".to_string();
 
         let mut value_bytes = [0u8; 32];
         fields.amount.to_big_endian(&mut value_bytes);
 
         let voucher = CmaVoucher {
-            destination: to_checksum(&fields.receiver, None),   
-            value: format!("0x{}", hex::encode(value_bytes)),   
-            payload,                                           
+            destination: to_checksum(&fields.receiver, None),
+            value: format!("0x{}", hex::encode(value_bytes)),
+            payload,
         };
 
         Ok(voucher)
     } else {
-        Err(CmaParserError::Message(
-            String::from("Invalid voucher fields for Ether")
-        ))
+        Err(CmaParserError::Message(String::from(
+            "Invalid voucher fields for Ether",
+        )))
     }
 }
 
-fn handle_erc20_voucher_encoding(voucher_request: &CmaParserVoucherData) -> Result<CmaVoucher, CmaParserError> {
+fn handle_erc20_voucher_encoding(
+    voucher_request: &CmaParserVoucherData,
+) -> Result<CmaVoucher, CmaParserError> {
     if let CmaVoucherFieldType::Erc20VoucherFields(fields) = &voucher_request.voucher_fields {
         let token = fields.token;
 
-        let args: Vec<Token> = vec![
-            Token::Address(fields.receiver),
-            Token::Uint(fields.amount),
-        ];
+        let args: Vec<Token> = vec![Token::Address(fields.receiver), Token::Uint(fields.amount)];
 
         let function_sig = "transfer(address,uint256)";
         let selector = &id(function_sig)[..4];
@@ -959,11 +1169,15 @@ fn handle_erc20_voucher_encoding(voucher_request: &CmaParserVoucherData) -> Resu
         };
         return Ok(voucher);
     } else {
-        Err(CmaParserError::Message( String::from("Invalid voucher fields for ERC20")))
+        Err(CmaParserError::Message(String::from(
+            "Invalid voucher fields for ERC20",
+        )))
     }
 }
 
-fn handle_erc721_voucher_encoding(voucher_request: &CmaParserVoucherData) -> Result<CmaVoucher, CmaParserError> {
+fn handle_erc721_voucher_encoding(
+    voucher_request: &CmaParserVoucherData,
+) -> Result<CmaVoucher, CmaParserError> {
     if let CmaVoucherFieldType::Erc721VoucherFields(fields) = &voucher_request.voucher_fields {
         let token = fields.token;
 
@@ -992,31 +1206,36 @@ fn handle_erc721_voucher_encoding(voucher_request: &CmaParserVoucherData) -> Res
 
         return Ok(voucher);
     } else {
-        Err(CmaParserError::Message( String::from("Invalid voucher fields for ERC721")))
+        Err(CmaParserError::Message(String::from(
+            "Invalid voucher fields for ERC721",
+        )))
     }
 }
 
-pub fn cma_encode_voucher (req_type: CmaParserVoucherType, voucher_request: CmaParserVoucherData ) -> Result<CmaVoucher, CmaParserError> {
+pub fn cma_encode_voucher(
+    req_type: CmaParserVoucherType,
+    voucher_request: CmaParserVoucherData,
+) -> Result<CmaVoucher, CmaParserError> {
     match req_type {
         CmaParserVoucherType::CmaParserVoucherTypeEther => {
             return handle_ether_voucher_encoding(&voucher_request);
-        },
+        }
         CmaParserVoucherType::CmaParserVoucherTypeErc20 => {
             return handle_erc20_voucher_encoding(&voucher_request);
-        },
+        }
         CmaParserVoucherType::CmaParserVoucherTypeErc721 => {
             return handle_erc721_voucher_encoding(&voucher_request);
-        },
+        }
         CmaParserVoucherType::CmaParserVoucherTypeErc1155Single => {
             // TODO Implement encoding logic for ERC1155 Single voucher
-            return Err(CmaParserError::Message( String::from("Not Implemented yet")))
-        },
+            return Err(CmaParserError::Message(String::from("Not Implemented yet")));
+        }
         CmaParserVoucherType::CmaParserVoucherTypeErc1155Batch => {
             // TODO Implement encoding logic for ERC1155 Batch voucher
-            return Err(CmaParserError::Message( String::from("Not Implemented yet")))
-        },
+            return Err(CmaParserError::Message(String::from("Not Implemented yet")));
+        }
         CmaParserVoucherType::CmaParserVoucherTypeNone => {
-            return Err(CmaParserError::Message( String::from("Not Implemented yet")))
+            return Err(CmaParserError::Message(String::from("Not Implemented yet")))
         }
     }
 }

@@ -29,9 +29,9 @@ pub struct CartesiAddresses {
 pub static CARTESI_ADDRESSES: Lazy<CartesiAddresses> = Lazy::new(|| CartesiAddresses {
     erc1155_batch_portal: "0xc700A2e5531E720a2434433b6ccf4c0eA2400051".to_string(),
     erc1155_single_portal: "0xc700A261279aFC6F755A3a67D86ae43E2eBD0051".to_string(),
-    erc20_portal:          "0xc700D6aDd016eECd59d989C028214Eaa0fCC0051".to_string(),
-    erc721_portal:         "0xc700d52F5290e978e9CAe7D1E092935263b60051".to_string(),
-    ether_portal:          "0xc70076a466789B595b50959cdc261227F0D70051".to_string(),
+    erc20_portal: "0xc700D6aDd016eECd59d989C028214Eaa0fCC0051".to_string(),
+    erc721_portal: "0xc700d52F5290e978e9CAe7D1E092935263b60051".to_string(),
+    ether_portal: "0xc70076a466789B595b50959cdc261227F0D70051".to_string(),
 });
 
 pub trait PortalMatcher {
