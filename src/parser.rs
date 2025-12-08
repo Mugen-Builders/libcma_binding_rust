@@ -4,7 +4,7 @@ use ethers_core::types::{Address, Bytes, U256};
 use ethers_core::utils::{id, to_checksum};
 
 use hex;
-use json::JsonValue;
+use json::{JsonValue};
 
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,6 +58,7 @@ enum TokenType {
 pub enum CmaParserInputType {
     CmaParserInputTypeNone,
     CmaParserInputTypeAuto,
+    CmaParserInputTypeUnidentified,
     CmaParserInputTypeEtherDeposit,
     CmaParserInputTypeErc20Deposit,
     CmaParserInputTypeErc721Deposit,
@@ -101,7 +102,7 @@ impl CmaParserInputType {
             "Erc1155BatchTransfer" => CmaParserInputType::CmaParserInputTypeErc1155BatchTransfer,
             "ledgerGetBalance" => CmaParserInputType::CmaParserInputTypeBalance,
             "ledgerGetTotalSupply" => CmaParserInputType::CmaParserInputTypeSupply,
-            _ => CmaParserInputType::CmaParserInputTypeNone,
+            _ => CmaParserInputType::CmaParserInputTypeUnidentified,
         }
     }
 }
@@ -113,6 +114,12 @@ pub enum CmaParserVoucherType {
     CmaParserVoucherTypeErc721,
     CmaParserVoucherTypeErc1155Single,
     CmaParserVoucherTypeErc1155Batch,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CmaParserUnidentifiedInputType {
+    CmaParserUnidentifiedInputJsonPayload(JsonValue),
+    CmaParserUnidentifiedInputStringPayload(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,9 +161,15 @@ pub struct CmaVoucher {
     pub payload: String,
 }
 
-pub struct CmaParserVoucherData {
-    pub voucher_fields: CmaVoucherFieldType,
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CmaParserUnidentifiedInput {
+    pub raw_input: CmaParserUnidentifiedInputType,
+    pub msg_sender: Address,
 }
+
+
 
 pub struct CmaParserEtherVoucherFields {
     pub amount: U256,
@@ -340,11 +353,50 @@ pub enum CmaParserInputData {
     Erc1155BatchTransfer(CmaParserErc1155BatchTransfer),
     Balance(CmaParserBalance),
     Supply(CmaParserSupply),
+    Unidentified(CmaParserUnidentifiedInput),
 }
 
 pub struct CmaParserInput {
     pub req_type: CmaParserInputType,
     pub input: CmaParserInputData,
+}
+
+fn handle_unidentified_method(input: JsonValue) -> Result<CmaParserInputData, CmaParserError> {
+    let payload_hex = input["data"]["payload"]
+        .as_str()
+        .ok_or(CmaParserError::Message(String::from("Invalid payload hex")))?;
+    let payload_str = hex_to_string(payload_hex)
+        .map_err(|e| CmaParserError::Message(format!("hex to string conversion error: {}", e)))?;
+    let msg_sender =
+        input["data"]["metadata"]["msg_sender"]
+            .as_str()
+            .ok_or(CmaParserError::Message(String::from(
+                "Invalid msg_sender address",
+            )))?;
+    let sender = Address::from_slice(
+        &hex::decode(msg_sender.trim_start_matches("0x"))
+            .map_err(|e| CmaParserError::Message(format!("hex decode error: {}", e)))?,
+    );
+
+    match json::parse(&payload_str) {
+        Ok(parsed_json) => {
+            return Ok(CmaParserInputData::Unidentified(CmaParserUnidentifiedInput {
+                raw_input: CmaParserUnidentifiedInputType::CmaParserUnidentifiedInputJsonPayload(
+                    parsed_json,
+                ),
+                msg_sender: sender,
+            }));
+        }
+        Err(_) => {
+            return Ok(CmaParserInputData::Unidentified(CmaParserUnidentifiedInput {
+                raw_input:
+                    CmaParserUnidentifiedInputType::CmaParserUnidentifiedInputStringPayload(
+                        payload_str,
+                    ),
+                msg_sender: sender,
+            }));
+        }
+    }
 }
 
 fn handle_parse_ether_deposit(input: JsonValue) -> Result<CmaParserInputData, CmaParserError> {
@@ -930,6 +982,12 @@ pub fn cma_decode_advance(input: JsonValue) -> Result<CmaParserInput, CmaParserE
                                 input: data,
                             });
                         }
+                        CmaParserInputType::CmaParserInputTypeUnidentified => {
+                           return handle_unidentified_method(input).map(|data| CmaParserInput {
+                                req_type,
+                                input: data,
+                            });
+                        }
                         _ => Err(CmaParserError::IncompatibleInput),
                     }
                 }
@@ -1120,9 +1178,9 @@ pub fn cma_decode_inspect(input: JsonValue) -> Result<CmaParserInput, CmaParserE
 }
 
 fn handle_ether_voucher_encoding(
-    voucher_request: &CmaParserVoucherData,
+    voucher_request: &CmaVoucherFieldType,
 ) -> Result<CmaVoucher, CmaParserError> {
-    if let CmaVoucherFieldType::EtherVoucherFields(fields) = &voucher_request.voucher_fields {
+    if let CmaVoucherFieldType::EtherVoucherFields(fields) = &voucher_request {
         let payload = "0x".to_string();
 
         let mut value_bytes = [0u8; 32];
@@ -1143,9 +1201,9 @@ fn handle_ether_voucher_encoding(
 }
 
 fn handle_erc20_voucher_encoding(
-    voucher_request: &CmaParserVoucherData,
+    voucher_request: &CmaVoucherFieldType,
 ) -> Result<CmaVoucher, CmaParserError> {
-    if let CmaVoucherFieldType::Erc20VoucherFields(fields) = &voucher_request.voucher_fields {
+    if let CmaVoucherFieldType::Erc20VoucherFields(fields) = &voucher_request {
         let token = fields.token;
 
         let args: Vec<Token> = vec![Token::Address(fields.receiver), Token::Uint(fields.amount)];
@@ -1177,9 +1235,9 @@ fn handle_erc20_voucher_encoding(
 }
 
 fn handle_erc721_voucher_encoding(
-    voucher_request: &CmaParserVoucherData,
+    voucher_request: &CmaVoucherFieldType,
 ) -> Result<CmaVoucher, CmaParserError> {
-    if let CmaVoucherFieldType::Erc721VoucherFields(fields) = &voucher_request.voucher_fields {
+    if let CmaVoucherFieldType::Erc721VoucherFields(fields) = &voucher_request {
         let token = fields.token;
 
         let args: Vec<Token> = vec![
@@ -1215,7 +1273,7 @@ fn handle_erc721_voucher_encoding(
 
 pub fn cma_encode_voucher(
     req_type: CmaParserVoucherType,
-    voucher_request: CmaParserVoucherData,
+    voucher_request: CmaVoucherFieldType,
 ) -> Result<CmaVoucher, CmaParserError> {
     match req_type {
         CmaParserVoucherType::CmaParserVoucherTypeEther => {

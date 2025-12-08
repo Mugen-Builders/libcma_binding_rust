@@ -2,7 +2,7 @@ use cma_rust_parser::helpers::{PortalMatcher, Portals, CARTESI_ADDRESSES};
 use cma_rust_parser::parser::{
     cma_decode_advance, cma_decode_inspect, cma_encode_voucher, CmaParserErc20VoucherFields,
     CmaParserErc721VoucherFields, CmaParserEtherVoucherFields, CmaParserInputData,
-    CmaParserInputType, CmaParserVoucherData, CmaParserVoucherType, CmaVoucherFieldType,
+    CmaParserInputType, CmaParserVoucherType, CmaVoucherFieldType,
 };
 use ethers_core::abi::{encode, Token};
 use ethers_core::types::{Address, U256};
@@ -393,12 +393,10 @@ fn test_ether_voucher_encoding_success() {
     let mut expected_value_bytes = [0u8; 32];
     amount.to_big_endian(&mut expected_value_bytes);
 
-    let request = CmaParserVoucherData {
-        voucher_fields: CmaVoucherFieldType::EtherVoucherFields(CmaParserEtherVoucherFields {
+    let request =  CmaVoucherFieldType::EtherVoucherFields(CmaParserEtherVoucherFields {
             receiver: recipient,
             amount,
-        }),
-    };
+        });
 
     match cma_encode_voucher(CmaParserVoucherType::CmaParserVoucherTypeEther, request) {
         Ok(voucher) => {
@@ -447,14 +445,12 @@ fn test_erc20_voucher_encoding_success() {
     payload_bytes.extend_from_slice(&encoded_args);
     let payload = format!("0x{}", hex::encode(payload_bytes));
 
-    let request = CmaParserVoucherData {
-        voucher_fields: CmaVoucherFieldType::Erc20VoucherFields(CmaParserErc20VoucherFields {
+    let request = CmaVoucherFieldType::Erc20VoucherFields(CmaParserErc20VoucherFields {
             token: token_address,
             amount,
             receiver: recipient,
             value: U256::zero(), // Value is typically zero for ERC20 transfers
-        }),
-    };
+        });
     match cma_encode_voucher(CmaParserVoucherType::CmaParserVoucherTypeErc20, request) {
         Ok(voucher) => {
             // Basic checks on the voucher structure
@@ -511,15 +507,13 @@ fn test_erc721_voucher_encoding_success() {
 
     println!("Expected payload: {}", payload);
 
-    let request = CmaParserVoucherData {
-        voucher_fields: CmaVoucherFieldType::Erc721VoucherFields(CmaParserErc721VoucherFields {
+    let request =  CmaVoucherFieldType::Erc721VoucherFields(CmaParserErc721VoucherFields {
             token: token_address,
             token_id,
             receiver: recipient,
             value: U256::zero(), // Value is typically zero for ERC721 transfers
             application_address,
-        }),
-    };
+        });
     match cma_encode_voucher(CmaParserVoucherType::CmaParserVoucherTypeErc721, request) {
         Ok(voucher) => {
             // Basic checks on the voucher structure

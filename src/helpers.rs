@@ -1,5 +1,8 @@
 use hex;
 use once_cell::sync::Lazy;
+use ethers_core::types::{Address};
+use json::{JsonValue, object};
+use crate::parser::CmaVoucher;
 
 pub fn hex_to_string(hex: &str) -> Result<String, Box<dyn std::error::Error>> {
     let hexstr = hex.strip_prefix("0x").unwrap_or(hex);
@@ -67,5 +70,38 @@ impl PortalMatcher for CartesiAddresses {
             Portals::EtherPortal => Some(&self.ether_portal),
             Portals::None => None,
         }
+    }
+}
+
+pub trait ToAddress {
+    fn to_address(&self) -> Result<Address, String>;
+}
+
+impl ToAddress for str {
+    fn to_address(&self) -> Result<Address, String> {
+        self.parse::<Address>()
+            .map_err(|e| format!("Invalid Ethereum address: {}", e))
+    }
+}
+
+impl ToAddress for String {
+    fn to_address(&self) -> Result<Address, String> {
+        self.as_str().to_address()
+    }
+}
+
+#[allow(dead_code)]
+pub trait ToJson {
+    fn to_json(&self) -> JsonValue;
+}
+
+impl ToJson for CmaVoucher {
+    fn to_json(&self) -> JsonValue {
+        let voucher = object! {
+            "destination" => format!("{}", self.destination),
+            "payload" => format!("{}", self.payload),
+            "value" => format!("{}", self.value),
+        };
+        return voucher;
     }
 }
