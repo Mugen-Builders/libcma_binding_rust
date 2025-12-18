@@ -100,7 +100,6 @@ impl ToJson for CmaVoucher {
         let voucher = object! {
             "destination" => format!("{}", self.destination),
             "payload" => format!("{}", self.payload),
-            "value" => format!("{}", self.value),
         };
         return voucher;
     }

@@ -26,7 +26,7 @@ This crate is useful for Cartesi dApp developers who need to:
 
 ## Dependencies
 
-- ethers-core = "2.0.14"
+- ethers-core = "1.0.0"
 - hex = "0.4.3"
 - json = "0.12"
 - once_cell = "1.18"
