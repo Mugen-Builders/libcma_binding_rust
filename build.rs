@@ -3,14 +3,19 @@ use std::{env, path::PathBuf};
 fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let include_dir = manifest_dir
+    let cma_include_dir = manifest_dir
         .join("third_party/machine-asset-tools/include")
+        .canonicalize()
+        .unwrap();
+    let cmt_include_dir = manifest_dir
+        .join("third_party/machine-guest-tools/sys-utils/libcmt/include")
         .canonicalize()
         .unwrap();
 
     let bindings = bindgen::Builder::default()
         .header(manifest_dir.join("wrapper.h").to_str().unwrap())
-        .clang_arg(format!("-I{}", include_dir.display()))
+        .clang_arg(format!("-I{}", cma_include_dir.display()))
+        .clang_arg(format!("-I{}", cmt_include_dir.display()))
         .allowlist_function("cma_.*")
         .allowlist_type("cma_.*")
         .allowlist_type("cmt_.*")
@@ -36,4 +41,5 @@ fn main() {
 
     println!("cargo:rerun-if-changed=wrapper.h");
     println!("cargo:rerun-if-changed=third_party/machine-asset-tools/include/");
+    println!("cargo:rerun-if-changed=third_party/machine-guest-tools/sys-utils/libcmt/include/");
 }

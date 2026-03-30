@@ -1,13 +1,13 @@
-use ethers_core::abi::{AbiParser, encode, FixedBytes, Token};
-use cma_rust_parser::parser::{
+use ethers_core::abi::{encode, AbiParser, FixedBytes, Token};
+use ethers_core::types::{Address, U256};
+use ethers_core::utils::id;
+use json::JsonValue;
+use libcma_binding_rust::helpers::{PortalMatcher, Portals, CARTESI_ADDRESSES};
+use libcma_binding_rust::parser::{
     cma_decode_advance, cma_decode_inspect, cma_encode_voucher, CmaParserErc20VoucherFields,
     CmaParserErc721VoucherFields, CmaParserEtherVoucherFields, CmaParserInputData,
     CmaParserInputType, CmaParserVoucherType, CmaVoucherFieldType,
 };
-use cma_rust_parser::helpers::{PortalMatcher, Portals, CARTESI_ADDRESSES};
-use ethers_core::types::{Address, U256};
-use ethers_core::utils::{id};
-use json::JsonValue;
 
 // Helper to create a basic JsonValue input structure
 fn create_test_input(msg_sender: &str, payload: &str) -> JsonValue {
@@ -162,9 +162,13 @@ fn test_erc721_deposit_success() {
 fn test_ethers_withdrawal_success() {
     let recipient = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266";
     let amount = U256::from_dec_str("1500000000000000000").unwrap(); // 1.5 Ether in wei
-    // let payload =   r#"{"function_type": "EtherWithdrawal", "amount": "1500000000000000000", "exec_layer_data": "0x"}"#.to_string();
+                                                                     // let payload =   r#"{"function_type": "EtherWithdrawal", "amount": "1500000000000000000", "exec_layer_data": "0x"}"#.to_string();
 
-    let abi_encoded_input = abi_encode_call("WithdrawEther(uint256, bytes)", vec![Token::Uint(amount), Token::Bytes(vec![0x0])]).unwrap();
+    let abi_encoded_input = abi_encode_call(
+        "WithdrawEther(uint256, bytes)",
+        vec![Token::Uint(amount), Token::Bytes(vec![0x0])],
+    )
+    .unwrap();
     let hex_input = format!("0x{}", hex::encode(&abi_encoded_input));
 
     let input = create_test_input(recipient, format!("{}", hex_input).as_str());
@@ -178,7 +182,10 @@ fn test_ethers_withdrawal_success() {
             {
                 if withdrawal.amount == amount && withdrawal.receiver == recipient.parse().unwrap()
                 {
-                    println!("withdrawal response is {}, {}", withdrawal.amount, withdrawal.receiver);
+                    println!(
+                        "withdrawal response is {}, {}",
+                        withdrawal.amount, withdrawal.receiver
+                    );
                     true
                 } else {
                     false
@@ -205,7 +212,15 @@ fn test_erc20_withdrawal_success() {
         .parse()
         .unwrap(); // TEST token address
 
-    let abi_encoded_input = abi_encode_call("WithdrawErc20(address,uint256,bytes)", vec![Token::Address(token_address), Token::Uint(amount), Token::Bytes(vec![0x0])]).unwrap();
+    let abi_encoded_input = abi_encode_call(
+        "WithdrawErc20(address,uint256,bytes)",
+        vec![
+            Token::Address(token_address),
+            Token::Uint(amount),
+            Token::Bytes(vec![0x0]),
+        ],
+    )
+    .unwrap();
     let hex_input = format!("0x{}", hex::encode(&abi_encoded_input));
 
     let input = create_test_input(recipient, format!("{}", hex_input).as_str());
@@ -245,7 +260,15 @@ fn test_erc721_withdrawal_success() {
         .parse()
         .unwrap(); // Sample ERC721 token address
 
-    let abi_encoded_input = abi_encode_call("WithdrawErc721(address,uint256,bytes)", vec![Token::Address(token_address), Token::Uint(token_id), Token::Bytes(vec![0x0])]).unwrap();
+    let abi_encoded_input = abi_encode_call(
+        "WithdrawErc721(address,uint256,bytes)",
+        vec![
+            Token::Address(token_address),
+            Token::Uint(token_id),
+            Token::Bytes(vec![0x0]),
+        ],
+    )
+    .unwrap();
     let hex_input = format!("0x{}", hex::encode(&abi_encoded_input));
 
     let input = create_test_input(recipient, format!("{}", hex_input).as_str());
@@ -287,8 +310,16 @@ fn test_ether_transfer_success() {
     let expected_receipient: U256 = U256::from_big_endian(&recipient);
 
     let amount = U256::from_dec_str("1500000000000000000").unwrap(); // 1.5 Ether in wei
-    
-    let abi_encoded_input = abi_encode_call("TransferEther(uint256,bytes32,bytes)", vec![Token::Uint(amount), Token::FixedBytes(recipient), Token::Bytes(vec![0x0])]).unwrap();
+
+    let abi_encoded_input = abi_encode_call(
+        "TransferEther(uint256,bytes32,bytes)",
+        vec![
+            Token::Uint(amount),
+            Token::FixedBytes(recipient),
+            Token::Bytes(vec![0x0]),
+        ],
+    )
+    .unwrap();
     let hex_input = format!("0x{}", hex::encode(&abi_encoded_input));
 
     let input = create_test_input(&sender.to_string(), format!("{}", hex_input).as_str());
@@ -298,9 +329,7 @@ fn test_ether_transfer_success() {
                 result.req_type == CmaParserInputType::CmaParserInputTypeEtherTransfer;
             let is_correct_transfer =
                 if let CmaParserInputData::EtherTransfer(transfer) = result.input {
-                    if transfer.amount == amount
-                        && transfer.receiver == expected_receipient
-                    {
+                    if transfer.amount == amount && transfer.receiver == expected_receipient {
                         true
                     } else {
                         false
@@ -333,8 +362,17 @@ fn test_erc20_transfer_success() {
     let expected_receipient: U256 = U256::from_big_endian(&recipient);
 
     let amount = U256::from_dec_str("1500000000000000000").unwrap(); // 1.5 Ether in wei
-    
-    let abi_encoded_input = abi_encode_call("TransferErc20(address,bytes32,uint256,bytes)", vec![Token::Address(token_address), Token::FixedBytes(recipient), Token::Uint(amount), Token::Bytes(vec![0x0])]).unwrap();
+
+    let abi_encoded_input = abi_encode_call(
+        "TransferErc20(address,bytes32,uint256,bytes)",
+        vec![
+            Token::Address(token_address),
+            Token::FixedBytes(recipient),
+            Token::Uint(amount),
+            Token::Bytes(vec![0x0]),
+        ],
+    )
+    .unwrap();
     let hex_input = format!("0x{}", hex::encode(&abi_encoded_input));
 
     let input = create_test_input(&sender.to_string(), format!("{}", hex_input).as_str());
@@ -378,8 +416,17 @@ fn test_erc721_transfer_success() {
     let recipient: FixedBytes = FixedBytes::from(recipient_bytes);
 
     let expected_receipient: U256 = U256::from_big_endian(&recipient);
-    
-    let abi_encoded_input = abi_encode_call("TransferErc721(address,bytes32,uint256,bytes)", vec![Token::Address(token_address), Token::FixedBytes(recipient), Token::Uint(token_id), Token::Bytes(vec![0x0])]).unwrap();
+
+    let abi_encoded_input = abi_encode_call(
+        "TransferErc721(address,bytes32,uint256,bytes)",
+        vec![
+            Token::Address(token_address),
+            Token::FixedBytes(recipient),
+            Token::Uint(token_id),
+            Token::Bytes(vec![0x0]),
+        ],
+    )
+    .unwrap();
     let hex_input = format!("0x{}", hex::encode(&abi_encoded_input));
 
     let input = create_test_input(&sender.to_string(), format!("{}", hex_input).as_str());
@@ -420,10 +467,10 @@ fn test_ether_voucher_encoding_success() {
     let mut expected_value_bytes = [0u8; 32];
     amount.to_big_endian(&mut expected_value_bytes);
 
-    let request =  CmaVoucherFieldType::EtherVoucherFields(CmaParserEtherVoucherFields {
-            receiver: recipient,
-            amount,
-        });
+    let request = CmaVoucherFieldType::EtherVoucherFields(CmaParserEtherVoucherFields {
+        receiver: recipient,
+        amount,
+    });
 
     match cma_encode_voucher(CmaParserVoucherType::CmaParserVoucherTypeEther, request) {
         Ok(voucher) => {
@@ -465,10 +512,10 @@ fn test_erc20_voucher_encoding_success() {
     let payload = format!("0x{}", hex::encode(payload_bytes));
 
     let request = CmaVoucherFieldType::Erc20VoucherFields(CmaParserErc20VoucherFields {
-            token: token_address,
-            amount,
-            receiver: recipient,
-        });
+        token: token_address,
+        amount,
+        receiver: recipient,
+    });
     match cma_encode_voucher(CmaParserVoucherType::CmaParserVoucherTypeErc20, request) {
         Ok(voucher) => {
             // Basic checks on the voucher structure
@@ -515,12 +562,12 @@ fn test_erc721_voucher_encoding_success() {
     payload_bytes.extend_from_slice(&encoded_args);
     let payload = format!("0x{}", hex::encode(payload_bytes));
 
-    let request =  CmaVoucherFieldType::Erc721VoucherFields(CmaParserErc721VoucherFields {
-            token: token_address,
-            token_id,
-            receiver: recipient,
-            application_address,
-        });
+    let request = CmaVoucherFieldType::Erc721VoucherFields(CmaParserErc721VoucherFields {
+        token: token_address,
+        token_id,
+        receiver: recipient,
+        application_address,
+    });
     match cma_encode_voucher(CmaParserVoucherType::CmaParserVoucherTypeErc721, request) {
         Ok(voucher) => {
             // Basic checks on the voucher structure

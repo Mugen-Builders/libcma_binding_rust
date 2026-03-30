@@ -1,17 +1,17 @@
 [package]
-name = "cma-rust-parser"
+name = "libcma_binding_rust"
 version = "0.1.3"
 edition = "2021"
 authors = ["Idogwu Chinonso idogwuchi@gmail.com"]
 description = "Rust utilities for Cartesi applicaitons, functions as a plugin wallet lib for managing applicaiton assets and also a parser for encoding and decoding vouchers and applicaion inputs."
 license = "MIT"
-repository = "https://github.com/Mugen-Builders/cma-rust-parser"
+repository = "https://github.com/Mugen-Builders/libcma_binding_rust"
 readme = "README.md"
 keywords = ["cartesi", "rollup", "ledger", "parser", "blockchain"]
 categories = ["api-bindings", "cryptography", "blockchain"]
 
 [lib]
-name = "cma_rust_parser"
+name = "libcma_binding_rust"
 path = "src/lib.rs"
 
 [dependencies]
@@ -26,5 +26,5 @@ bindgen = "0.69"
 
 [features]
 default = ["native"]
-native = ["lazy_static"]  # Mac testing with mocks
-riscv64 = []  # Cross-build later
+native = ["lazy_static"] # Mac testing with mocks
+riscv64 = []             # Cross-build later

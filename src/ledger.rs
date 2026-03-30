@@ -43,6 +43,7 @@ impl Ledger {
     ) -> Result<LedgerAssetId, LedgerError> {
         unsafe {
             let mut out_asset_id = asset_id.map(|id| id.0).unwrap_or(0);
+            let mut c_asset_type = asset_type.to_c();
             let mut out_token_address = token_address
                 .map(|addr| addr.to_c())
                 .unwrap_or_else(|| bindings::cmt_abi_address_t { data: [0u8; 20] });
@@ -63,7 +64,7 @@ impl Ledger {
                 } else {
                     ptr::null_mut()
                 },
-                asset_type.to_c(),
+                &mut c_asset_type,
                 operation.to_c(),
             );
 
@@ -134,8 +135,9 @@ impl Ledger {
     ) -> Result<LedgerAccountId, LedgerError> {
         unsafe {
             let mut out_account_id = account_id.map(|id| id.0).unwrap_or(0);
+            let mut c_account_type = account_type.to_c();
             let mut c_account = std::mem::zeroed::<bindings::cma_ledger_account_t>();
-            c_account.type_ = account_type.to_c();
+            c_account.type_ = c_account_type;
 
             let addr_ptr = if let Some(addr) = addr_or_id {
                 addr.as_ptr() as *const std::ffi::c_void
@@ -148,7 +150,7 @@ impl Ledger {
                 &mut out_account_id,
                 &mut c_account,
                 addr_ptr,
-                account_type.to_c(),
+                &mut c_account_type,
                 operation.to_c(),
             );
 
