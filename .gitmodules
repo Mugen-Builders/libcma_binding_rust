@@ -1,0 +1,7 @@
+[submodule "third_party/machine-asset-tools"]
+	path = third_party/machine-asset-tools
+	url = https://github.com/Mugen-Builders/machine-asset-tools
+[submodule "third_party/machine-guest-tools"]
+	path = third_party/machine-guest-tools
+	url = https://github.com/cartesi/machine-guest-tools
+	branch = main

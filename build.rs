@@ -3,7 +3,10 @@ use std::{env, path::PathBuf};
 fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let include_dir = manifest_dir.join("lib/cpp-build/include").canonicalize().unwrap();
+    let include_dir = manifest_dir
+        .join("third_party/machine-asset-tools/include")
+        .canonicalize()
+        .unwrap();
 
     let bindings = bindgen::Builder::default()
         .header(manifest_dir.join("wrapper.h").to_str().unwrap())
@@ -23,11 +26,14 @@ fn main() {
 
     // Only link the C++ library when not using native mocks
     if !cfg!(feature = "native") {
-        let lib_dir = manifest_dir.join("lib/cpp-build/lib").canonicalize().unwrap();
+        let lib_dir = manifest_dir
+            .join("third_party/machine-asset-tools/build/riscv64")
+            .canonicalize()
+            .unwrap();
         println!("cargo:rustc-link-search=native={}", lib_dir.display());
         println!("cargo:rustc-link-lib=static=cma");
     }
 
     println!("cargo:rerun-if-changed=wrapper.h");
-    println!("cargo:rerun-if-changed=lib/cpp-build/include/");
+    println!("cargo:rerun-if-changed=third_party/machine-asset-tools/include/");
 }

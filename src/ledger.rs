@@ -75,40 +75,53 @@ impl Ledger {
         }
     }
 
-    pub fn retrieve_erc20_asset_via_address(&mut self, token_address: Address) -> Result<LedgerAssetId, LedgerError> {
-        let asset_id = self.retrieve_asset(
-            None,
-            Some(token_address),
-            None,
-            AssetType::TokenAddress,
-            RetrieveOperation::FindOrCreate,
-        ).map_err(|e| e)?;
+    pub fn retrieve_erc20_asset_via_address(
+        &mut self,
+        token_address: Address,
+    ) -> Result<LedgerAssetId, LedgerError> {
+        let asset_id = self
+            .retrieve_asset(
+                None,
+                Some(token_address),
+                None,
+                AssetType::TokenAddress,
+                RetrieveOperation::FindOrCreate,
+            )
+            .map_err(|e| e)?;
 
-        return Ok(asset_id)
+        return Ok(asset_id);
     }
 
-    pub fn retrieve_erc721_assets_via_address(&mut self, token_address: Address, token_id: U256) -> Result<LedgerAssetId, LedgerError> {
-        let asset_id = self.retrieve_asset(
-            None,
-            Some(token_address),
-            Some(token_id),
-            AssetType::TokenAddressId,
-            RetrieveOperation::FindOrCreate,
-        ).map_err(|e| e)?;
+    pub fn retrieve_erc721_assets_via_address(
+        &mut self,
+        token_address: Address,
+        token_id: U256,
+    ) -> Result<LedgerAssetId, LedgerError> {
+        let asset_id = self
+            .retrieve_asset(
+                None,
+                Some(token_address),
+                Some(token_id),
+                AssetType::TokenAddressId,
+                RetrieveOperation::FindOrCreate,
+            )
+            .map_err(|e| e)?;
 
-        return Ok(asset_id)
+        return Ok(asset_id);
     }
 
     pub fn retrieve_ether_assets(&mut self) -> Result<LedgerAssetId, LedgerError> {
-        let asset_id = self.retrieve_asset(
-            None,
-            None,
-            None,
-            AssetType::TokenAddressId,
-            RetrieveOperation::FindOrCreate,
-        ).map_err(|e| e)?;
+        let asset_id = self
+            .retrieve_asset(
+                None,
+                None,
+                None,
+                AssetType::TokenAddressId,
+                RetrieveOperation::FindOrCreate,
+            )
+            .map_err(|e| e)?;
 
-        return Ok(asset_id)
+        return Ok(asset_id);
     }
 
     /// Retrieve or create an account
@@ -148,18 +161,21 @@ impl Ledger {
     }
 
     /// Simple Retrieve or create account
-    pub fn retrieve_account_via_address(&mut self, account_address: Address) -> Result<LedgerAccountId, LedgerError> {
-        let account_id = self.retrieve_account(
-            None,
-            AccountType::WalletAddress,
-            RetrieveOperation::FindOrCreate,
-            Some(account_address.as_bytes()),
-        ).map_err(|e| e)?;
+    pub fn retrieve_account_via_address(
+        &mut self,
+        account_address: Address,
+    ) -> Result<LedgerAccountId, LedgerError> {
+        let account_id = self
+            .retrieve_account(
+                None,
+                AccountType::WalletAddress,
+                RetrieveOperation::FindOrCreate,
+                Some(account_address.as_bytes()),
+            )
+            .map_err(|e| e)?;
 
-        return Ok(account_id)
+        return Ok(account_id);
     }
-
-
 
     /// Deposit assets to an account
     pub fn deposit(

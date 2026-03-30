@@ -1,6 +1,22 @@
-# cma-rust-parser
+# libcma-binding-rust
 
 Lightweight Rust utilities to parse Cartesi Machine Application (CMA) inputs and to build on-chain voucher payloads to be executed on the base layer.
+
+## Clone with submodules
+
+This repository vendors `machine-asset-tools` as a git submodule under `third_party/`.
+
+Clone the repository and fetch submodules in one step with:
+
+```bash
+git clone --recurse-submodules https://github.com/Mugen-Builders/libcma_binding_rust
+```
+
+If you already cloned the repository without submodules, initialize them with:
+
+```bash
+git submodule update --init --recursive
+```
 
 This crate is useful for Cartesi dApp developers who need to:
 
