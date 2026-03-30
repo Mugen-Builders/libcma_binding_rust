@@ -1,7 +1,69 @@
 use crate::bindings;
 use crate::error::LedgerError;
 use crate::types::*;
+use std::ffi::CString;
+use std::path::Path;
 use std::ptr;
+
+/// Storage mode for file-backed ledgers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LedgerMemoryMode {
+    OpenOnly,
+    CreateOnly,
+}
+
+impl LedgerMemoryMode {
+    fn to_c(self) -> bindings::cma_ledger_memory_mode_t {
+        match self {
+            LedgerMemoryMode::OpenOnly => bindings::cma_ledger_memory_mode_t_CMA_LEDGER_OPEN_ONLY,
+            LedgerMemoryMode::CreateOnly => {
+                bindings::cma_ledger_memory_mode_t_CMA_LEDGER_CREATE_ONLY
+            }
+        }
+    }
+}
+
+/// Configuration for file-backed ledger initialization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LedgerFileConfig {
+    pub mode: LedgerMemoryMode,
+    pub offset: usize,
+    pub memory_length: usize,
+    pub max_accounts: usize,
+    pub max_assets: usize,
+    pub max_balances: usize,
+}
+
+impl Default for LedgerFileConfig {
+    fn default() -> Self {
+        Self {
+            mode: LedgerMemoryMode::CreateOnly,
+            offset: 0,
+            memory_length: 1024 * 1024,
+            max_accounts: 256,
+            max_assets: 256,
+            max_balances: 1024,
+        }
+    }
+}
+
+/// Configuration for buffer-backed ledger initialization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LedgerBufferConfig {
+    pub max_accounts: usize,
+    pub max_assets: usize,
+    pub max_balances: usize,
+}
+
+impl Default for LedgerBufferConfig {
+    fn default() -> Self {
+        Self {
+            max_accounts: 256,
+            max_assets: 256,
+            max_balances: 1024,
+        }
+    }
+}
 
 /// Safe wrapper around the C ledger
 pub struct Ledger {
@@ -9,6 +71,32 @@ pub struct Ledger {
 }
 
 impl Ledger {
+    fn restore_empty_ledger(&mut self) {
+        unsafe {
+            let _ = bindings::cma_ledger_init(&mut self.inner);
+        }
+    }
+
+    fn reinitialize(
+        &mut self,
+        init_fn: impl FnOnce(*mut bindings::cma_ledger_t) -> i32,
+    ) -> Result<(), LedgerError> {
+        unsafe {
+            let fini_result = bindings::cma_ledger_fini(&mut self.inner);
+            if fini_result < 0 {
+                return Err(LedgerError::from_code(fini_result));
+            }
+
+            let init_result = init_fn(&mut self.inner);
+            if init_result < 0 {
+                self.restore_empty_ledger();
+                return Err(LedgerError::from_code(init_result));
+            }
+
+            Ok(())
+        }
+    }
+
     /// Initialize a new ledger
     pub fn new() -> Result<Self, LedgerError> {
         unsafe {
@@ -292,6 +380,58 @@ impl Ledger {
 
             Ok(U256::from_c(&out_supply))
         }
+    }
+
+    // get last error message
+    pub fn get_last_error_message(&self) -> Result<String, LedgerError> {
+        unsafe {
+            let msg = bindings::cma_ledger_get_last_error_message();
+            if msg.is_null() {
+                return Err(LedgerError::Unknown);
+            }
+            Ok(std::ffi::CStr::from_ptr(msg).to_string_lossy().to_string())
+        }
+    }
+
+    /// Reinitialize this ledger using file-backed storage.
+    pub fn init_from_file<P: AsRef<Path>>(
+        &mut self,
+        file_path: P,
+        config: LedgerFileConfig,
+    ) -> Result<(), LedgerError> {
+        let file_path = CString::new(file_path.as_ref().to_string_lossy().as_bytes())
+            .map_err(|_| LedgerError::Other(-22))?;
+
+        self.reinitialize(|ledger| unsafe {
+            bindings::cma_ledger_init_file(
+                ledger,
+                file_path.as_ptr(),
+                config.mode.to_c(),
+                config.offset,
+                config.memory_length,
+                config.max_accounts,
+                config.max_assets,
+                config.max_balances,
+            )
+        })
+    }
+
+    /// Reinitialize this ledger using caller-provided memory.
+    pub fn init_from_buffer(
+        &mut self,
+        buffer: &mut [u8],
+        config: LedgerBufferConfig,
+    ) -> Result<(), LedgerError> {
+        self.reinitialize(|ledger| unsafe {
+            bindings::cma_ledger_init_buffer(
+                ledger,
+                buffer.as_mut_ptr() as *mut _,
+                buffer.len(),
+                config.max_accounts,
+                config.max_assets,
+                config.max_balances,
+            )
+        })
     }
 }
 

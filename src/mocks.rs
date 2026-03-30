@@ -61,6 +61,40 @@ pub unsafe extern "C" fn cma_ledger_init(ledger: *mut bindings::cma_ledger_t) ->
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn cma_ledger_init_file(
+    ledger: *mut bindings::cma_ledger_t,
+    memory_file_name: *const std::ffi::c_char,
+    _mode: bindings::cma_ledger_memory_mode_t,
+    _offset: usize,
+    mem_length: usize,
+    _n_accounts: usize,
+    _n_assets: usize,
+    _n_balances: usize,
+) -> i32 {
+    if ledger.is_null() || memory_file_name.is_null() || mem_length == 0 {
+        return bindings::CMA_LEDGER_ERROR_UNKNOWN as i32;
+    }
+
+    cma_ledger_init(ledger)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn cma_ledger_init_buffer(
+    ledger: *mut bindings::cma_ledger_t,
+    buffer: *mut std::ffi::c_void,
+    mem_length: usize,
+    _n_accounts: usize,
+    _n_assets: usize,
+    _n_balances: usize,
+) -> i32 {
+    if ledger.is_null() || buffer.is_null() || mem_length == 0 {
+        return bindings::CMA_LEDGER_ERROR_UNKNOWN as i32;
+    }
+
+    cma_ledger_init(ledger)
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn cma_ledger_fini(_ledger: *mut bindings::cma_ledger_t) -> i32 {
     bindings::CMA_LEDGER_SUCCESS as i32
 }

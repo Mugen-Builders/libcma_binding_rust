@@ -1,4 +1,6 @@
 use libcma_binding_rust::{Ledger, LedgerError, *};
+use std::fs::OpenOptions;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Helper function to create a test token address
 fn test_token_address() -> TokenAddress {
@@ -16,6 +18,18 @@ fn test_account_address() -> Address {
     Address::new(bytes)
 }
 
+fn unique_temp_file_path() -> std::path::PathBuf {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+    std::env::temp_dir().join(format!(
+        "libcma-ledger-test-{}-{}.bin",
+        std::process::id(),
+        unique
+    ))
+}
+
 #[test]
 fn test_ledger_initialization() {
     let ledger = Ledger::new();
@@ -27,6 +41,85 @@ fn test_ledger_reset() {
     let mut ledger = Ledger::new().expect("Failed to initialize ledger");
     let result = ledger.reset();
     assert!(result.is_ok(), "Ledger reset should succeed");
+}
+
+#[test]
+fn test_init_from_file_reinitializes_ledger() {
+    let mut ledger = Ledger::new().expect("Failed to initialize ledger");
+
+    let token_addr = test_token_address();
+    let token_id = U256::from_u64(99);
+    ledger
+        .retrieve_asset(
+            None,
+            Some(token_addr),
+            Some(token_id),
+            AssetType::TokenAddressId,
+            RetrieveOperation::Create,
+        )
+        .expect("Should create asset before reinitializing");
+
+    let path = unique_temp_file_path();
+    let config = LedgerFileConfig::default();
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path)
+        .expect("Should create temp file");
+    file.set_len(config.memory_length as u64)
+        .expect("Should size temp file");
+
+    ledger
+        .init_from_file(&path, config)
+        .expect("File-backed initialization should succeed");
+
+    let result = ledger.retrieve_asset(
+        None,
+        Some(token_addr),
+        Some(token_id),
+        AssetType::TokenAddressId,
+        RetrieveOperation::Find,
+    );
+    assert!(
+        matches!(result, Err(LedgerError::AssetNotFound)),
+        "Reinitialized ledger should not retain previous assets"
+    );
+
+    drop(ledger);
+    std::fs::remove_file(path).expect("Should remove temp file");
+}
+
+#[test]
+fn test_init_from_buffer_reinitializes_ledger() {
+    let mut ledger = Ledger::new().expect("Failed to initialize ledger");
+
+    let wallet_addr = test_account_address();
+    ledger
+        .retrieve_account(
+            None,
+            AccountType::WalletAddress,
+            RetrieveOperation::Create,
+            Some(wallet_addr.as_bytes()),
+        )
+        .expect("Should create account before reinitializing");
+
+    let mut buffer = vec![0u8; 1024 * 1024];
+    ledger
+        .init_from_buffer(&mut buffer, LedgerBufferConfig::default())
+        .expect("Buffer-backed initialization should succeed");
+
+    let result = ledger.retrieve_account(
+        None,
+        AccountType::WalletAddress,
+        RetrieveOperation::Find,
+        Some(wallet_addr.as_bytes()),
+    );
+    assert!(
+        matches!(result, Err(LedgerError::AccountNotFound)),
+        "Reinitialized ledger should not retain previous accounts"
+    );
 }
 
 #[test]
