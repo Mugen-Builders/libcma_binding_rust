@@ -86,12 +86,14 @@ pub unsafe extern "C" fn cma_ledger_retrieve_asset(
     asset_id: *mut u64,
     token_address: *mut bindings::cmt_abi_address_t,
     token_id: *mut bindings::cmt_abi_u256_t,
-    asset_type: bindings::cma_ledger_asset_type_t,
+    asset_type: *mut bindings::cma_ledger_asset_type_t,
     operation: bindings::cma_ledger_retrieve_operation_t,
 ) -> i32 {
-    if asset_id.is_null() {
+    if asset_id.is_null() || asset_type.is_null() {
         return bindings::CMA_LEDGER_ERROR_UNKNOWN as i32;
     }
+
+    let asset_type = *asset_type;
 
     MOCK_STATE.with(|state| {
         let mut s = state.borrow_mut();
@@ -186,12 +188,14 @@ pub unsafe extern "C" fn cma_ledger_retrieve_account(
     account_id: *mut u64,
     _account: *mut bindings::cma_ledger_account_t,
     addr_or_id: *const std::ffi::c_void,
-    account_type: bindings::cma_ledger_account_type_t,
+    account_type: *mut bindings::cma_ledger_account_type_t,
     operation: bindings::cma_ledger_retrieve_operation_t,
 ) -> i32 {
-    if account_id.is_null() {
+    if account_id.is_null() || account_type.is_null() {
         return bindings::CMA_LEDGER_ERROR_UNKNOWN as i32;
     }
+
+    let account_type = *account_type;
 
     MOCK_STATE.with(|state| {
         let mut s = state.borrow_mut();

@@ -1,6 +1,6 @@
 [package]
 name = "libcma_binding_rust"
-version = "0.1.3"
+version = "0.0.1"
 edition = "2021"
 authors = ["Idogwu Chinonso idogwuchi@gmail.com"]
 description = "Rust utilities for Cartesi applicaitons, functions as a plugin wallet lib for managing applicaiton assets and also a parser for encoding and decoding vouchers and applicaion inputs."
