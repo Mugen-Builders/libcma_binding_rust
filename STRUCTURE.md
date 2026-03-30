@@ -1,64 +1,74 @@
-# Repository Structure
+# Repository structure
 
-This document explains the structure of the `cma-rust-parser` crate and how it's organized for publishing to crates.io.
+This document describes how the **`libcma_binding_rust`** crate is laid out: Rust sources, vendored C headers, and how the build ties them together.
 
-## Directory Layout
+## Top-level layout
 
 ```
-cma-rust-parser/
-├── Cargo.toml              # Main crate configuration for publishing
-├── build.rs                # Build script that generates Rust bindings from C headers
-├── wrapper.h               # C header wrapper that includes all necessary headers
-├── README.md               # User-facing documentation
-├── .gitignore             # Git ignore rules
-├── src/                    # Rust source code
-│   ├── lib.rs             # Library root - exports all public APIs
-│   ├── error.rs           # Error types (LedgerError, ParserError)
-│   ├── ledger.rs          # Ledger implementation (main functionality)
-│   ├── types.rs           # Type definitions (Address, U256, etc.)
-│   └── mocks.rs           # Mock implementations (only compiled with "native" feature)
-├── tests/                  # Integration tests
-│   └── ledger_tests.rs   # Comprehensive ledger tests
-└── lib/                    # Vendor dependencies (included in package)
-    ├── cpp-build/         # C++ library
-    │   ├── include/       # C/C++ headers
-    │   └── lib/          # Compiled static libraries (.a files)
-    └── rust-bindings/     # Original bindings (kept for reference)
+libcma_binding_rust/          # crate root (see Cargo.toml [package] name)
+├── Cargo.toml
+├── Cargo.lock
+├── build.rs                  # bindgen + optional link of static libcma
+├── wrapper.h                 # includes libcmt + libcma headers for bindings
+├── README.md
+├── STRUCTURE.md
+├── .gitmodules               # submodule URLs for third_party/*
+├── src/
+│   ├── lib.rs                # crate root, re-exports public API (includes generated bindings from OUT_DIR)
+│   ├── error.rs              # LedgerError, ParserError
+│   ├── types.rs              # Address/U256 helpers, ledger enums, etc.
+│   ├── ledger.rs             # Ledger wrapper + file/buffer init configs
+│   ├── parser.rs             # High-level parser / voucher helpers
+│   ├── helpers.rs            # Shared helpers
+│   └── mocks.rs              # #[cfg(feature = "native")] C ABI shims for tests
+├── tests/
+│   ├── ledger_tests.rs       # Ledger behavior (mock-backed by default)
+│   └── parser_tests.rs       # Parser / encoding tests
+└── third_party/              # git submodules (must be initialized)
+    ├── machine-asset-tools/  # Mugen-Builders machine-asset-tools → libcma headers (and optional RISC-V lib)
+    └── machine-guest-tools/  # cartesi/machine-guest-tools → libcmt headers under sys-utils/libcmt/include
 ```
 
-## Key Design Decisions
+There is **no** checked-in `lib/cpp-build` tree in this layout: bindgen runs against headers under `third_party/`, and linking the real archive is optional (see below).
 
-### 1. Self-Contained Package
-- The `lib/` directory contains both the C++ headers and compiled libraries
-- This ensures the crate is self-contained and doesn't require external dependencies
-- Users can simply `cargo add cma-rust-parser` without additional setup
+## Submodule roles
 
-### 2. Feature Flags
-- **`native`** (default): Uses Rust mocks for testing on macOS/development
-- **`riscv64`**: Uses the real C++ library for RISC-V targets (Cartesi production)
+| Path | Upstream (typical) | Role |
+|------|-------------------|------|
+| `third_party/machine-asset-tools` | [machine-asset-tools](https://github.com/Mugen-Builders/machine-asset-tools) | `include/libcma/*.h` and, when built, `build/riscv64/libcma.a` (or project-specific layout) for `--no-default-features` links. |
+| `third_party/machine-guest-tools` | [machine-guest-tools](https://github.com/cartesi/machine-guest-tools) | `sys-utils/libcmt/include` so includes like `libcmt/abi.h` resolve during bindgen. |
 
-### 3. Build System
-- `build.rs` uses `bindgen` to generate Rust bindings from C headers
-- Automatically links the C++ library when not using native mocks
-- Paths are relative to `CARGO_MANIFEST_DIR` for portability
+`wrapper.h` pulls in libcmt first, then libcma (`parser.h`, `types.h`, `ledger.h`).
 
-## How It Works
+## Build pipeline (`build.rs`)
 
-1. **During `cargo build`**:
-   - `build.rs` runs and generates `bindings.rs` from `wrapper.h`
-   - If `native` feature is enabled, mocks are compiled instead of linking C++ library
-   - If `riscv64` feature is enabled, the C++ static library is linked
+1. **Include paths** passed to clang/bindgen:
+   - `third_party/machine-asset-tools/include`
+   - `third_party/machine-guest-tools/sys-utils/libcmt/include`
+2. **Header root** — `wrapper.h` at the crate root.
+3. **Generated output** — `$OUT_DIR/bindings.rs` (included from `src/lib.rs` inside the `bindings` module).
+4. **Linking** — If the **`native` feature is disabled**, `build.rs` adds `-L third_party/machine-asset-tools/build/riscv64` and links `static=cma`. With **`native` enabled (default)**, it does not link that archive; `src/mocks.rs` supplies compatible `#[no_mangle]` symbols for development and `cargo test` on the host.
 
-2. **User imports**:
-   ```rust
-   use cma_rust_parser::{Ledger, LedgerError, U256, Address, ...};
-   ```
+## Feature flags
 
-3. **All functionality** is exposed through the main `lib.rs` file
+- **`native` (default)** — Compiles `mocks.rs`. Intended for host builds and unit/integration tests without the RISC-V static library.
+- **`riscv64`** — Placeholder feature for cross-compilation workflows; default build still keys off “not native” for linking.
 
-## File Sizes
+## Public surface (`src/lib.rs`)
 
-The `lib/cpp-build/lib/` directory contains compiled static libraries. These are:
-- Platform-specific (RISC-V for Cartesi)
-- Included in the package for users targeting RISC-V
-- Not used when `native` feature is enabled (default)
+Re-exports include:
+
+- `Ledger`, `LedgerError`, `LedgerFileConfig`, `LedgerBufferConfig`, `LedgerMemoryMode`
+- Parser types and helpers (`CmaParserInput`, `CmaVoucher`, …) and `ParserError`
+- `types::*` (addresses, amounts, ledger enums, etc.)
+
+## Tests
+
+- **`tests/ledger_tests.rs`** — Ledger API; uses mock implementations when `native` is on.
+- **`tests/parser_tests.rs`** — Parser and voucher-related coverage.
+
+Run: `cargo test`.
+
+## Historical note
+
+Older revisions described a `lib/` vendor tree and the name `cma-rust-parser`. The current crate is **`libcma_binding_rust`** and vendors headers via **`third_party/`** submodules as above.
