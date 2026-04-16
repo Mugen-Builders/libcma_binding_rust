@@ -5,7 +5,7 @@ pub mod bindings {
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 }
 
-#[cfg(feature = "native")]
+#[cfg(any(feature = "native", cma_host_mocks))]
 mod mocks;
 
 pub mod error;

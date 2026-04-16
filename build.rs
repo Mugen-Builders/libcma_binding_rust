@@ -29,14 +29,34 @@ fn main() {
         .write_to_file(out_dir.join("bindings.rs"))
         .expect("Failed to write bindings");
 
-    // Only link the C++ library when not using native mocks
+    // Without `native`, prefer linking the real static `libcma.a`. If it is missing (typical on a
+    // host that has not run the machine-asset-tools Docker build), fall back to the same Rust mocks
+    // as `native` so `cargo build --no-default-features` still works for CI and local dev.
     if !cfg!(feature = "native") {
-        let lib_dir = manifest_dir
-            .join("third_party/machine-asset-tools/build/riscv64")
-            .canonicalize()
-            .unwrap();
-        println!("cargo:rustc-link-search=native={}", lib_dir.display());
-        println!("cargo:rustc-link-lib=static=cma");
+        println!("cargo:rustc-check-cfg=cfg(cma_host_mocks)");
+        println!("cargo:rerun-if-env-changed=CMA_LIB_DIR");
+        let lib_dir = env::var("CMA_LIB_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                manifest_dir.join("third_party/machine-asset-tools/build/riscv64")
+            });
+        let lib_a = lib_dir.join("libcma.a");
+        println!("cargo:rerun-if-changed={}", lib_a.display());
+
+        if lib_a.is_file() {
+            let lib_dir = lib_dir.canonicalize().unwrap_or_else(|e| {
+                panic!("failed to resolve path {}: {e}", lib_dir.display());
+            });
+            println!("cargo:rustc-link-search=native={}", lib_dir.display());
+            println!("cargo:rustc-link-lib=static=cma");
+        } else {
+            println!(
+                "cargo:warning=libcma.a not found at {}; compiling host mocks instead. \
+                 Set CMA_LIB_DIR or build machine-asset-tools to link the static library.",
+                lib_a.display()
+            );
+            println!("cargo:rustc-cfg=cma_host_mocks");
+        }
     }
 
     println!("cargo:rerun-if-changed=wrapper.h");

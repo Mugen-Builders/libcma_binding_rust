@@ -1,4 +1,4 @@
-#![cfg(feature = "native")]
+#![cfg(any(feature = "native", cma_host_mocks))]
 
 use crate::bindings;
 use std::collections::HashMap;
@@ -80,22 +80,57 @@ pub unsafe extern "C" fn cma_ledger_reset(_ledger: *mut bindings::cma_ledger_t) 
     bindings::CMA_LEDGER_SUCCESS as i32
 }
 
+/// Host mock: file-backed reinit starts with an empty ledger (see real `cma_ledger_init_file`).
+#[no_mangle]
+pub unsafe extern "C" fn cma_ledger_init_file(
+    ledger: *mut bindings::cma_ledger_t,
+    _memory_file_name: *const std::ffi::c_char,
+    _mode: bindings::cma_ledger_memory_mode_t,
+    _offset: usize,
+    _mem_length: usize,
+    _n_accounts: usize,
+    _n_assets: usize,
+    _n_balances: usize,
+) -> i32 {
+    if ledger.is_null() {
+        return bindings::CMA_LEDGER_ERROR_UNKNOWN as i32;
+    }
+    cma_ledger_reset(ledger)
+}
+
+/// Host mock: buffer-backed reinit starts with an empty ledger (see real `cma_ledger_init_buffer`).
+#[no_mangle]
+pub unsafe extern "C" fn cma_ledger_init_buffer(
+    ledger: *mut bindings::cma_ledger_t,
+    _buffer: *mut std::ffi::c_void,
+    _mem_length: usize,
+    _n_accounts: usize,
+    _n_assets: usize,
+    _n_balances: usize,
+) -> i32 {
+    if ledger.is_null() {
+        return bindings::CMA_LEDGER_ERROR_UNKNOWN as i32;
+    }
+    cma_ledger_reset(ledger)
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn cma_ledger_retrieve_asset(
     _ledger: *mut bindings::cma_ledger_t,
     asset_id: *mut u64,
     token_address: *mut bindings::cmt_abi_address_t,
     token_id: *mut bindings::cmt_abi_u256_t,
-    asset_type: bindings::cma_ledger_asset_type_t,
+    asset_type: *mut bindings::cma_ledger_asset_type_t,
     operation: bindings::cma_ledger_retrieve_operation_t,
 ) -> i32 {
-    if asset_id.is_null() {
+    if asset_id.is_null() || asset_type.is_null() {
         return bindings::CMA_LEDGER_ERROR_UNKNOWN as i32;
     }
 
     MOCK_STATE.with(|state| {
         let mut s = state.borrow_mut();
 
+        let asset_type = *asset_type;
         match asset_type {
             t if t == bindings::cma_ledger_asset_type_t_CMA_LEDGER_ASSET_TYPE_ID => {
                 if !token_address.is_null() && !token_id.is_null() {
@@ -186,17 +221,17 @@ pub unsafe extern "C" fn cma_ledger_retrieve_account(
     account_id: *mut u64,
     _account: *mut bindings::cma_ledger_account_t,
     addr_or_id: *const std::ffi::c_void,
-    account_type: bindings::cma_ledger_account_type_t,
+    account_type: *mut bindings::cma_ledger_account_type_t,
     operation: bindings::cma_ledger_retrieve_operation_t,
 ) -> i32 {
-    if account_id.is_null() {
+    if account_id.is_null() || account_type.is_null() {
         return bindings::CMA_LEDGER_ERROR_UNKNOWN as i32;
     }
 
     MOCK_STATE.with(|state| {
         let mut s = state.borrow_mut();
 
-        if account_type == bindings::cma_ledger_account_type_t_CMA_LEDGER_ACCOUNT_TYPE_WALLET_ADDRESS
+        if *account_type == bindings::cma_ledger_account_type_t_CMA_LEDGER_ACCOUNT_TYPE_WALLET_ADDRESS
             && !addr_or_id.is_null()
         {
             let addr_bytes = std::slice::from_raw_parts(addr_or_id as *const u8, 20);
