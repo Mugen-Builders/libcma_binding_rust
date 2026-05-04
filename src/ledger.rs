@@ -152,6 +152,7 @@ impl Ledger {
                 } else {
                     ptr::null_mut()
                 },
+                ptr::null_mut(),
                 &mut c_asset_type,
                 operation.to_c(),
             );
@@ -238,6 +239,7 @@ impl Ledger {
                 &mut out_account_id,
                 &mut c_account,
                 addr_ptr,
+                ptr::null_mut(),
                 &mut c_account_type,
                 operation.to_c(),
             );
@@ -354,6 +356,7 @@ impl Ledger {
                 asset_id.0,
                 account_id.0,
                 &mut out_balance,
+                ptr::null_mut(),
             );
 
             if result < 0 {
@@ -364,14 +367,20 @@ impl Ledger {
         }
     }
 
-    /// Get total supply for an asset
+    /// Get total supply for an asset (via [`cma_ledger_retrieve_asset`] with find).
     pub fn get_total_supply(&self, asset_id: LedgerAssetId) -> Result<U256, LedgerError> {
         unsafe {
-            let mut out_supply = std::mem::zeroed::<bindings::cmt_abi_u256_t>();
-            let result = bindings::cma_ledger_get_total_supply(
+            let mut asset_id_mut = asset_id.0;
+            let mut asset_type = bindings::cma_ledger_asset_type_t_CMA_LEDGER_ASSET_TYPE_ID;
+            let mut out_supply = std::mem::zeroed::<bindings::cma_amount_t>();
+            let result = bindings::cma_ledger_retrieve_asset(
                 &self.inner as *const _ as *mut _,
-                asset_id.0,
+                &mut asset_id_mut,
+                ptr::null_mut(),
+                ptr::null_mut(),
                 &mut out_supply,
+                &mut asset_type,
+                bindings::cma_ledger_retrieve_operation_t_CMA_LEDGER_OP_FIND,
             );
 
             if result < 0 {

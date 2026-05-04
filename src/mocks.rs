@@ -114,12 +114,28 @@ pub unsafe extern "C" fn cma_ledger_reset(_ledger: *mut bindings::cma_ledger_t) 
     bindings::CMA_LEDGER_SUCCESS as i32
 }
 
+fn mock_total_supply_for_asset(s: &MockLedgerState, asset_id: u64) -> [u8; 32] {
+    let mut total = [0u8; 32];
+    for ((a_id, _), balance) in &s.balances {
+        if *a_id == asset_id {
+            let mut carry = 0u16;
+            for i in (0..32).rev() {
+                let sum = total[i] as u16 + balance[i] as u16 + carry;
+                total[i] = sum as u8;
+                carry = sum >> 8;
+            }
+        }
+    }
+    total
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn cma_ledger_retrieve_asset(
     _ledger: *mut bindings::cma_ledger_t,
     asset_id: *mut u64,
     token_address: *mut bindings::cmt_abi_address_t,
     token_id: *mut bindings::cmt_abi_u256_t,
+    out_total_supply: *mut bindings::cma_amount_t,
     asset_type: *mut bindings::cma_ledger_asset_type_t,
     operation: bindings::cma_ledger_retrieve_operation_t,
 ) -> i32 {
@@ -134,13 +150,23 @@ pub unsafe extern "C" fn cma_ledger_retrieve_asset(
 
         match asset_type {
             t if t == bindings::cma_ledger_asset_type_t_CMA_LEDGER_ASSET_TYPE_ID => {
+                let id_val = *asset_id;
+                if id_val != 0 && s.assets.contains_key(&id_val) {
+                    if !out_total_supply.is_null() {
+                        (*out_total_supply).data = mock_total_supply_for_asset(&s, id_val);
+                    }
+                    return bindings::CMA_LEDGER_SUCCESS as i32;
+                }
                 if !token_address.is_null() && !token_id.is_null() {
                     let addr = (*token_address).data;
                     let id = (*token_id).data;
                     let lookup_key = (addr, id);
-                    
+
                     if let Some(&found_id) = s.asset_lookup.get(&lookup_key) {
                         *asset_id = found_id;
+                        if !out_total_supply.is_null() {
+                            (*out_total_supply).data = mock_total_supply_for_asset(&s, found_id);
+                        }
                         return bindings::CMA_LEDGER_SUCCESS as i32;
                     }
                 }
@@ -153,6 +179,10 @@ pub unsafe extern "C" fn cma_ledger_retrieve_asset(
                         if let Some(ref stored_addr) = info.token_address {
                             if stored_addr == &addr {
                                 *asset_id = id;
+                                if !out_total_supply.is_null() {
+                                    let sum = mock_total_supply_for_asset(&s, id);
+                                    (*out_total_supply).data = sum;
+                                }
                                 return bindings::CMA_LEDGER_SUCCESS as i32;
                             }
                         }
@@ -167,6 +197,10 @@ pub unsafe extern "C" fn cma_ledger_retrieve_asset(
                     
                     if let Some(&found_id) = s.asset_lookup.get(&lookup_key) {
                         *asset_id = found_id;
+                        if !out_total_supply.is_null() {
+                            let sum = mock_total_supply_for_asset(&s, found_id);
+                            (*out_total_supply).data = sum;
+                        }
                         return bindings::CMA_LEDGER_SUCCESS as i32;
                     }
                 }
@@ -209,6 +243,9 @@ pub unsafe extern "C" fn cma_ledger_retrieve_asset(
                 }
 
                 *asset_id = new_id;
+                if !out_total_supply.is_null() {
+                    (*out_total_supply).data = mock_total_supply_for_asset(&s, new_id);
+                }
                 bindings::CMA_LEDGER_SUCCESS as i32
             }
             _ => bindings::CMA_LEDGER_ERROR_UNKNOWN as i32,
@@ -222,6 +259,7 @@ pub unsafe extern "C" fn cma_ledger_retrieve_account(
     account_id: *mut u64,
     _account: *mut bindings::cma_ledger_account_t,
     addr_or_id: *const std::ffi::c_void,
+    n_balances: *mut usize,
     account_type: *mut bindings::cma_ledger_account_type_t,
     operation: bindings::cma_ledger_retrieve_operation_t,
 ) -> i32 {
@@ -243,6 +281,13 @@ pub unsafe extern "C" fn cma_ledger_retrieve_account(
 
             if let Some(&found_id) = s.account_lookup.get(&addr) {
                 *account_id = found_id;
+                if !n_balances.is_null() {
+                    *n_balances = s
+                        .balances
+                        .keys()
+                        .filter(|(_, acct)| *acct == found_id)
+                        .count();
+                }
                 return bindings::CMA_LEDGER_SUCCESS as i32;
             }
 
@@ -266,6 +311,9 @@ pub unsafe extern "C" fn cma_ledger_retrieve_account(
                     s.account_lookup.insert(addr, new_id);
 
                     *account_id = new_id;
+                    if !n_balances.is_null() {
+                        *n_balances = 0;
+                    }
                     return bindings::CMA_LEDGER_SUCCESS as i32;
                 }
                 _ => {}
@@ -393,6 +441,7 @@ pub unsafe extern "C" fn cma_ledger_get_balance(
     asset_id: u64,
     account_id: u64,
     out_balance: *mut bindings::cmt_abi_u256_t,
+    account_balance_info: *mut bindings::cma_ledger_account_balance_info_t,
 ) -> i32 {
     if out_balance.is_null() {
         return bindings::CMA_LEDGER_ERROR_UNKNOWN as i32;
@@ -413,42 +462,10 @@ pub unsafe extern "C" fn cma_ledger_get_balance(
         let balance = s.balances.get(&key).copied().unwrap_or([0u8; 32]);
         (*out_balance).data = balance;
 
-        bindings::CMA_LEDGER_SUCCESS as i32
-    })
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn cma_ledger_get_total_supply(
-    _ledger: *const bindings::cma_ledger_t,
-    asset_id: u64,
-    out_total_supply: *mut bindings::cmt_abi_u256_t,
-) -> i32 {
-    if out_total_supply.is_null() {
-        return bindings::CMA_LEDGER_ERROR_UNKNOWN as i32;
-    }
-
-    MOCK_STATE.with(|state| {
-        let s = state.borrow();
-
-        if !s.assets.contains_key(&asset_id) {
-            return bindings::CMA_LEDGER_ERROR_ASSET_NOT_FOUND as i32;
+        if !account_balance_info.is_null() {
+            (*account_balance_info).balance = core::ptr::null_mut();
         }
 
-        // Sum all balances for this asset
-        let mut total = [0u8; 32];
-        for ((a_id, _), balance) in &s.balances {
-            if *a_id == asset_id {
-                // Add balance to total (big-endian addition)
-                let mut carry = 0u16;
-                for i in (0..32).rev() {
-                    let sum = total[i] as u16 + balance[i] as u16 + carry;
-                    total[i] = sum as u8;
-                    carry = sum >> 8;
-                }
-            }
-        }
-
-        (*out_total_supply).data = total;
         bindings::CMA_LEDGER_SUCCESS as i32
     })
 }
