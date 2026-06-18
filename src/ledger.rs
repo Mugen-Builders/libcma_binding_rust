@@ -201,17 +201,13 @@ impl Ledger {
     }
 
     pub fn retrieve_ether_assets(&mut self) -> Result<LedgerAssetId, LedgerError> {
-        let asset_id = self
-            .retrieve_asset(
-                None,
-                None,
-                None,
-                AssetType::TokenAddressId,
-                RetrieveOperation::FindOrCreate,
-            )
-            .map_err(|e| e)?;
-
-        return Ok(asset_id);
+        self.retrieve_asset(
+            None,
+            None,
+            None,
+            AssetType::Base,
+            RetrieveOperation::FindOrCreate,
+        )
     }
 
     /// Retrieve or create an account

@@ -31,7 +31,9 @@ struct AccountInfo {
 // Use thread-local storage so each test thread has its own state
 thread_local! {
     static MOCK_STATE: RefCell<MockLedgerState> = RefCell::new(MockLedgerState {
-        next_asset_id: 1,
+        // Asset id 1 is reserved for the Base (Ether) asset (see BASE_ASSET_ID),
+        // so generated token asset ids must start at 2 to avoid colliding with it.
+        next_asset_id: 2,
         next_account_id: 1,
         assets: HashMap::new(),
         accounts: HashMap::new(),
@@ -49,7 +51,7 @@ pub unsafe extern "C" fn cma_ledger_init(ledger: *mut bindings::cma_ledger_t) ->
     // Reset the mock state
     MOCK_STATE.with(|state| {
         let mut s = state.borrow_mut();
-        s.next_asset_id = 1;
+        s.next_asset_id = 2; // reserve id 1 for Base (Ether) asset
         s.next_account_id = 1;
         s.assets.clear();
         s.accounts.clear();
@@ -103,7 +105,7 @@ pub unsafe extern "C" fn cma_ledger_fini(_ledger: *mut bindings::cma_ledger_t) -
 pub unsafe extern "C" fn cma_ledger_reset(_ledger: *mut bindings::cma_ledger_t) -> i32 {
     MOCK_STATE.with(|state| {
         let mut s = state.borrow_mut();
-        s.next_asset_id = 1;
+        s.next_asset_id = 2; // reserve id 1 for Base (Ether) asset
         s.next_account_id = 1;
         s.assets.clear();
         s.accounts.clear();
@@ -152,32 +154,51 @@ pub unsafe extern "C" fn cma_ledger_retrieve_asset(
             t if t == bindings::cma_ledger_asset_type_t_CMA_LEDGER_ASSET_TYPE_ID => {
                 let id_val = *asset_id;
                 if id_val != 0 && s.assets.contains_key(&id_val) {
+                    if operation == bindings::cma_ledger_retrieve_operation_t_CMA_LEDGER_OP_FIND_AND_REMOVE
+                    {
+                        s.balances.retain(|(a_id, _), _| *a_id != id_val);
+                        s.assets.remove(&id_val);
+                        s.asset_lookup.retain(|_, v| *v != id_val);
+                        return bindings::CMA_LEDGER_SUCCESS as i32;
+                    }
                     if !out_total_supply.is_null() {
                         (*out_total_supply).data = mock_total_supply_for_asset(&s, id_val);
                     }
                     return bindings::CMA_LEDGER_SUCCESS as i32;
                 }
-                if !token_address.is_null() && !token_id.is_null() {
-                    let addr = (*token_address).data;
-                    let id = (*token_id).data;
-                    let lookup_key = (addr, id);
-
-                    if let Some(&found_id) = s.asset_lookup.get(&lookup_key) {
-                        *asset_id = found_id;
-                        if !out_total_supply.is_null() {
-                            (*out_total_supply).data = mock_total_supply_for_asset(&s, found_id);
-                        }
-                        return bindings::CMA_LEDGER_SUCCESS as i32;
+            }
+            t if t == bindings::cma_ledger_asset_type_t_CMA_LEDGER_ASSET_TYPE_BASE => {
+                const BASE_ASSET_ID: u64 = 1;
+                if s.assets.contains_key(&BASE_ASSET_ID) {
+                    *asset_id = BASE_ASSET_ID;
+                    if !out_total_supply.is_null() {
+                        (*out_total_supply).data =
+                            mock_total_supply_for_asset(&s, BASE_ASSET_ID);
                     }
+                    return bindings::CMA_LEDGER_SUCCESS as i32;
                 }
+                if operation == bindings::cma_ledger_retrieve_operation_t_CMA_LEDGER_OP_FIND {
+                    return bindings::CMA_LEDGER_ERROR_ASSET_NOT_FOUND as i32;
+                }
+                s.assets.insert(
+                    BASE_ASSET_ID,
+                    AssetInfo {
+                        token_address: None,
+                        token_id: None,
+                    },
+                );
+                *asset_id = BASE_ASSET_ID;
+                if !out_total_supply.is_null() {
+                    (*out_total_supply).data = mock_total_supply_for_asset(&s, BASE_ASSET_ID);
+                }
+                return bindings::CMA_LEDGER_SUCCESS as i32;
             }
             t if t == bindings::cma_ledger_asset_type_t_CMA_LEDGER_ASSET_TYPE_TOKEN_ADDRESS => {
                 if !token_address.is_null() {
                     let addr = (*token_address).data;
-                    // Simple lookup by address only
                     for (&id, info) in &s.assets {
                         if let Some(ref stored_addr) = info.token_address {
-                            if stored_addr == &addr {
+                            if stored_addr == &addr && info.token_id.is_none() {
                                 *asset_id = id;
                                 if !out_total_supply.is_null() {
                                     let sum = mock_total_supply_for_asset(&s, id);
@@ -189,12 +210,15 @@ pub unsafe extern "C" fn cma_ledger_retrieve_asset(
                     }
                 }
             }
-            t if t == bindings::cma_ledger_asset_type_t_CMA_LEDGER_ASSET_TYPE_TOKEN_ADDRESS_ID => {
+            t if t == bindings::cma_ledger_asset_type_t_CMA_LEDGER_ASSET_TYPE_TOKEN_ADDRESS_ID
+                || t
+                    == bindings::cma_ledger_asset_type_t_CMA_LEDGER_ASSET_TYPE_TOKEN_ADDRESS_ID_AMOUNT =>
+            {
                 if !token_address.is_null() && !token_id.is_null() {
                     let addr = (*token_address).data;
                     let id = (*token_id).data;
                     let lookup_key = (addr, id);
-                    
+
                     if let Some(&found_id) = s.asset_lookup.get(&lookup_key) {
                         *asset_id = found_id;
                         if !out_total_supply.is_null() {
@@ -209,8 +233,10 @@ pub unsafe extern "C" fn cma_ledger_retrieve_asset(
         }
 
         match operation {
-            op if op == bindings::cma_ledger_retrieve_operation_t_CMA_LEDGER_OP_FIND => {
-                return bindings::CMA_LEDGER_ERROR_ASSET_NOT_FOUND as i32;
+            op if op == bindings::cma_ledger_retrieve_operation_t_CMA_LEDGER_OP_FIND
+                || op == bindings::cma_ledger_retrieve_operation_t_CMA_LEDGER_OP_FIND_AND_REMOVE =>
+            {
+                bindings::CMA_LEDGER_ERROR_ASSET_NOT_FOUND as i32
             }
             op if op == bindings::cma_ledger_retrieve_operation_t_CMA_LEDGER_OP_CREATE
                 || op == bindings::cma_ledger_retrieve_operation_t_CMA_LEDGER_OP_FIND_OR_CREATE =>

@@ -1,0 +1,61 @@
+name: test
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  native-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install libclang for bindgen
+        run: sudo apt-get update && sudo apt-get install -y clang libclang-dev
+
+      - name: Run mocked native tests
+        run: cargo test --features native
+
+  riscv-link-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y clang libclang-dev build-essential cmake
+
+      - name: Build libcma for riscv64
+        working-directory: third_party/machine-asset-tools
+        run: |
+          make third-party-boost
+          make docker ARGS="build/riscv64/libcma.a"
+
+      - name: Verify riscv64 libcma artifact
+        run: |
+          set -euo pipefail
+          lib=third_party/machine-asset-tools/build/riscv64/libcma.a
+          if [[ ! -f "$lib" ]]; then
+            echo "Missing $lib"
+            ls -laR third_party/machine-asset-tools/build/riscv64 || true
+            exit 1
+          fi
+          member=$(ar t "$lib" | head -1)
+          obj=$(mktemp)
+          ar p "$lib" "$member" > "$obj"
+          file "$obj" | grep -F 'RISC-V'
+          rm -f "$obj"

@@ -97,10 +97,10 @@ pub trait ToJson {
 
 impl ToJson for CmaVoucher {
     fn to_json(&self) -> JsonValue {
-        let voucher = object! {
+        object! {
             "destination" => format!("{}", self.destination),
+            "value" => format!("{}", self.value),
             "payload" => format!("{}", self.payload),
-        };
-        return voucher;
+        }
     }
 }

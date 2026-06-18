@@ -646,6 +646,15 @@ fn test_find_nonexistent_account() {
 }
 
 #[test]
+fn test_retrieve_ether_asset() {
+    let mut ledger = Ledger::new().expect("Failed to initialize ledger");
+    let asset_id = ledger
+        .retrieve_ether_assets()
+        .expect("Should create base ether asset");
+    assert!(asset_id.0 > 0, "Ether asset ID should be non-zero");
+}
+
+#[test]
 fn test_large_amounts() {
     let mut ledger = Ledger::new().expect("Failed to initialize ledger");
 
