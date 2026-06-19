@@ -6,96 +6,72 @@
 <div align="center">
 	<i>Cartesi Rollups LIBCMA Binding for Rust</i>
 </div>
-<div align="center">
-	<!-- <b>Any Code. Ethereum's Security.</b> -->
-</div>
 <br>
-<p align="center">
-	<img src="https://img.shields.io/github/license/Mugen-Builders/libcma_binding_rust?style=default&logo=opensourceinitiative&logoColor=white&color=008DA5" alt="license">
-	<img src="https://img.shields.io/github/last-commit/Mugen-Builders/libcma_binding_rustt?style=default&logo=git&logoColor=white&color=000000" alt="last-commit">
-</p>
 
 # libcma-binding-rust
 
-LIBCMA is a Lightweight Rust utilities to parse Cartesi Machine Application (CMA) inputs, build on-chain voucher payloads to be executed on the base layer and handle core asset operations such as deposits, withdrawals, transfers, and balance checks. It acts as a plugin wallet for applicaitons and is particularly useful when you want scalable, predictable, and secure asset management in Cartesi applications that support assets like ETH, ERC20, ERC721, and ERC1155.
+LIBCMA is a lightweight Rust binding for Cartesi Machine Application (CMA) tooling: parse rollup inputs, build on-chain voucher payloads, and manage application assets (deposits, withdrawals, transfers, balances) for ETH, ERC-20, ERC-721, and ERC-1155.
 
 ## Clone with submodules
 
-Headers come from two git submodules under `third_party/`:
+Headers come from git submodules under `third_party/`:
 
-- **`third_party/machine-asset-tools`** — `libcma` (parser, types, ledger).
-- **`third_party/machine-guest-tools`** — `libcmt` headers used by `libcma` (e.g. `libcmt/abi.h`); required for `bindgen` when generating bindings.
-
-Clone with submodules in one step:
+- **`third_party/machine-asset-tools`** — `libcma` (parser, types, ledger)
+- **`third_party/machine-guest-tools`** — `libcmt` headers used by `libcma`
 
 ```bash
 git clone --recurse-submodules https://github.com/Mugen-Builders/libcma_binding_rust
-```
-
-If you already cloned without submodules:
-
-```bash
+# or, if already cloned:
 git submodule update --init --recursive
 ```
 
 ## Build requirements
 
-- **Clang / libclang** — `bindgen` needs a working libclang installation (same as any typical `bindgen` setup).
-- **Submodules** — `build.rs` expects both `third_party` trees to exist (after the step above).
-- **Linking the real C library** — With default features disabled, the build links the static library from `third_party/machine-asset-tools/build/riscv64` (see **Feature flags**). For local development on the host, the default `native` feature uses Rust mocks instead of linking that binary.
+- **Clang / libclang** for `bindgen`
+- **Submodules** present before building
+- **Real C library** — disable default features to link the static `libcma` archive from `third_party/machine-asset-tools/build/riscv64`
 
 ## Feature flags
 
-| Feature   | Default | Purpose                                                                                                                                                |
-| --------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `native`  | yes     | Compiles `src/mocks.rs` shims for ledger/parser C symbols so you can build and run tests on the host (e.g. macOS) without the RISC-V `libcma` archive. |
-| `riscv64` | no      | Reserved for cross-builds that link the vendored static `cma` library (see `build.rs`).                                                                |
-
-Build without default features when you have the static library path and target set up:
+| Feature   | Default | Purpose |
+| --------- | ------- | ------- |
+| `native`  | yes     | Compiles `src/mocks.rs` shims so host tests run without the RISC-V `libcma` archive |
+| `riscv64` | no      | Cross-build path that links the vendored static `cma` library |
 
 ```bash
-cargo build --no-default-features
+cargo build --no-default-features --features riscv64
 ```
 
 ## Ledger wrapper
 
-The `Ledger` type wraps the C `cma_ledger_*` API. Besides `Ledger::new()` (in-memory basic ledger), you can reinitialize storage using the same functions as the C library:
+`Ledger` wraps `cma_ledger_*` with helpers for file/buffer initialization, asset/account retrieval, deposit/withdraw/transfer, balance, and total supply.
 
-- `Ledger::init_from_file(path, LedgerFileConfig { ... })` → `cma_ledger_init_file`
-- `Ledger::init_from_buffer(&mut [u8], LedgerBufferConfig { ... })` → `cma_ledger_init_buffer`
-
-Exported helpers: `LedgerMemoryMode`, `LedgerFileConfig`, `LedgerBufferConfig`.
+- `retrieve_ether_assets()` uses `AssetType::Base`
+- `AssetType` also supports `TokenAddress`, `TokenAddressId`, and `TokenAddressIdAmount`
+- `RetrieveOperation::FindAndRemove` is supported
 
 ## Parser and vouchers
 
-This crate is useful for Cartesi dApp developers who need to:
+Pure-Rust parser aligned with `machine-asset-tools` / Cartesi Rollups v2.0:
 
-- Decode deposit payloads coming from Cartesi portals (ETH, ERC20, ERC721, ERC1155).
-- Decode withdrawal / transfer / ledger inspection requests encoded as JSON and hex.
-- Encode voucher payloads for on-chain token transfers (Ether, ERC20, ERC721 — ERC1155 encoding TODO).
+- Portal deposit decoding (packed + ABI tails for ERC-721/1155)
+- Auto-decode withdrawals/transfers by function selector
+- Inspect decoding for `ledger_getBalance` and `ledger_getTotalSupply`
+- Voucher encoding for Ether, ERC-20, ERC-721 (`safeTransferFrom`), ERC-1155 single/batch (`safeTransferFrom` / `safeBatchTransferFrom`)
 
 ### Core public functions
 
-- `cma_decode_advance(input: JsonValue) -> Result<CmaParserInput, CmaParserError>`  
-  Detects whether an input is a portal deposit (based on the caller address) or a user instruction (withdrawal/transfer). Returns a typed `CmaParserInput` (enum + associated structs) with parsed fields (addresses, amounts, token ids, exec_layer data).
-- `cma_decode_inspect(input: JsonValue) -> Result<CmaParserInput, CmaParserError>`  
-  Parses inspection (ledger) requests like `ledgerGetBalance` and `ledgerGetTotalSupply` encoded as JSON-in-hex and returns structured arguments.
-- `cma_encode_voucher(req_type: CmaParserVoucherType, voucher_request: CmaParserVoucherData) -> Result<CmaVoucher, CmaParserError>`  
-  Builds a `CmaVoucher` (destination, value, payload) for sending to the chain. Implemented for Ether, ERC20 and ERC721 vouchers.
+- `cma_decode_advance(req_type, input) -> Result<CmaParserInput, CmaParserError>`
+- `cma_decode_inspect(input) -> Result<CmaParserInput, CmaParserError>`
+- `cma_encode_voucher(req_type, app_address, voucher_request) -> Result<CmaVoucher, CmaParserError>`
 
-### Important types
+`CmaVoucher` fields: `destination`, `value` (wei for ether vouchers), `payload`.
 
-- `CmaParserInputType` — recognized request types (deposits, withdrawals, transfers, ledger queries).
-- `CmaParserInputData` — enum wrapping parsed payload structs, e.g. `EtherDeposit`, `Erc20Transfer`, `EtherWithdrawal`, etc.
-- `CmaParserError` — parsing error variants and helper conversions.
-- `CmaVoucher` — voucher structure (destination, value, payload) ready for submission.
+Inspect params are flat JSON strings, e.g.:
 
-## Dependencies
-
-- ethers-core = "1.0.0"
-- hex = "0.4"
-- json = "0.12"
-- once_cell = "1.18"
+```json
+{"method":"ledger_getBalance","params":["0x...account...","0x...token...","0x1"]}
+```
 
 ## Tests
 
@@ -103,16 +79,11 @@ This crate is useful for Cartesi dApp developers who need to:
 cargo test
 ```
 
-Ledger integration tests exercise the `native` mock path by default.
+- `tests/parser_tests.rs` — integration tests against the pure-Rust parser
+- `tests/parser_vectors.rs` — vectors ported from `third_party/machine-asset-tools/tests/parser.c`
+- `tests/ledger_tests.rs` — ledger tests via native mocks
 
-## Notes and limitations
-
-- ERC1155 voucher encoding is not implemented (placeholders return not implemented).
-- The parser expects JSON input as received by the application; it inspects the caller and method to choose a decoding path.
-
-## Contributing
-
-- Open PRs for improvements, add missing voucher encodings, add more exhaustive parsing tests for edge cases.
+CI runs native tests on every push/PR and attempts an riscv64 link check when `libcma` can be built.
 
 ## License
 
