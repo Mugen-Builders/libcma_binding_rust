@@ -2,12 +2,19 @@ use ethers_core::abi::{encode, AbiParser, FixedBytes, Token};
 use ethers_core::types::{Address, U256};
 use ethers_core::utils::id;
 use json::JsonValue;
-use libcma_binding_rust::helpers::{PortalMatcher, Portals, CARTESI_ADDRESSES};
 use libcma_binding_rust::parser::{
     cma_decode_advance, cma_decode_inspect, cma_encode_voucher, CmaParserErc20VoucherFields,
     CmaParserErc721VoucherFields, CmaParserEtherVoucherFields, CmaParserInputData,
     CmaParserInputType, CmaParserVoucherType, CmaVoucherFieldType,
 };
+
+// Portal addresses used purely as the `msg_sender` of test inputs. Portal
+// matching is a consumer concern (the library no longer ships addresses);
+// `cma_decode_advance` selects the decoder from the explicit `req_type`, so the
+// exact value here does not affect decoding.
+const ETHER_PORTAL: &str = "0xc70076a466789B595b50959cdc261227F0D70051";
+const ERC20_PORTAL: &str = "0xc700D6aDd016eECd59d989C028214Eaa0fCC0051";
+const ERC721_PORTAL: &str = "0xc700d52F5290e978e9CAe7D1E092935263b60051";
 
 // Helper to create a basic JsonValue input structure
 fn create_test_input(msg_sender: &str, payload: &str) -> JsonValue {
@@ -34,12 +41,7 @@ fn test_ether_deposit_success() {
     let amount = U256::from_dec_str("2000000000000000000").unwrap(); // 2 Ether in wei
     let payload = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb922660000000000000000000000000000000000000000000000001bc16d674ec80000".to_string(); // Sample payload from the ether portal
 
-    let input = create_test_input(
-        CARTESI_ADDRESSES
-            .get_portal_address(Portals::EtherPortal)
-            .unwrap(),
-        &payload,
-    );
+    let input = create_test_input(ETHER_PORTAL, &payload);
 
     match cma_decode_advance(CmaParserInputType::CmaParserInputTypeEtherDeposit, input) {
         Ok(result) => {
@@ -116,12 +118,7 @@ fn test_erc20_deposit_success() {
         .unwrap();
     let payload = "0xfbdb734ef6a23ad76863cba6f10d0c5cbbd8342cf39fd6e51aad88f6f4ce6ab8827279cfffb9226600000000000000000000000000000000000000000000001043561a8829300000".to_string();
 
-    let input = create_test_input(
-        CARTESI_ADDRESSES
-            .get_portal_address(Portals::ERC20Portal)
-            .unwrap(),
-        &payload,
-    );
+    let input = create_test_input(ERC20_PORTAL, &payload);
 
     match cma_decode_advance(CmaParserInputType::CmaParserInputTypeErc20Deposit, input) {
         Ok(result) => {
@@ -152,12 +149,7 @@ fn test_erc721_deposit_success() {
         .unwrap(); // Sample ERC721 token address
     let payload = "0xba46623ad94ab45850c4ecba9555d26328917c3bf39fd6e51aad88f6f4ce6ab8827279cfffb9226600000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000006000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".to_string(); // Sample payload from the ERC721 portal
 
-    let input = create_test_input(
-        CARTESI_ADDRESSES
-            .get_portal_address(Portals::ERC721Portal)
-            .unwrap(),
-        &payload,
-    );
+    let input = create_test_input(ERC721_PORTAL, &payload);
     match cma_decode_advance(CmaParserInputType::CmaParserInputTypeErc721Deposit, input) {
         Ok(result) => {
             let is_correct_method =

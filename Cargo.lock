@@ -603,7 +603,6 @@ dependencies = [
  "hex",
  "json",
  "lazy_static",
- "once_cell",
 ]
 
 [[package]]
