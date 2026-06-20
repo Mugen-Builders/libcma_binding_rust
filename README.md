@@ -27,16 +27,28 @@ git submodule update --init --recursive
 
 ## Build requirements
 
-- **Clang / libclang** for `bindgen`
-- **Submodules** present before building
-- **Real C library** — disable default features to link the static `libcma` archive from `third_party/machine-asset-tools/build/riscv64`
+A plain `cargo build` works out of the box — `build.rs` takes care of the fiddly parts:
+
+- **Submodules auto-init.** If `third_party/` is empty (you cloned without `--recurse-submodules`), `build.rs` runs `git submodule update --init --recursive` for you.
+- **bindgen clang headers auto-fallback.** `bindgen` needs the compiler's builtin headers (`stdbool.h`, …). If your `libclang` ships without them (e.g. you have `libclang1` but not `libclang-common-*-dev`), `build.rs` falls back to GCC's builtin header dir automatically — no `BINDGEN_EXTRA_CLANG_ARGS` needed. Set that env var yourself to override.
+
+So the only hard host requirement for the default build is:
+
+- **A Rust toolchain + `libclang`** (for `bindgen`) and **`git`** (for the submodule fetch).
+
+For the **`riscv64`** build (linking the real C++ `libcma`), `build.rs` also cross-compiles the static archive from source if it isn't already present. That path additionally needs:
+
+- **GNU `make`, `wget`, and network access**
+- **The RISC-V GCC 14 cross toolchain** — `g++-14-riscv64-linux-gnu` / `gcc-14-riscv64-linux-gnu` (libcma's C++ source requires GCC ≥ 14). Override the compiler names with `CMA_RISCV64_CXX` / `CMA_RISCV64_CC`.
+
+The Cartesi SDK / app Docker image used to build the machine already provides all of these.
 
 ## Feature flags
 
 | Feature   | Default | Purpose |
 | --------- | ------- | ------- |
 | `native`  | yes     | Compiles `src/mocks.rs` shims so host tests run without the RISC-V `libcma` archive |
-| `riscv64` | no      | Cross-build path that links the vendored static `cma` library |
+| `riscv64` | no      | Cross-build path that links the real C++ `cma` library; `build.rs` cross-compiles `build/riscv64/libcma.a` from the submodule source if it isn't already present (needs the RISC-V GCC 14 cross toolchain) |
 
 ```bash
 cargo build --no-default-features --features riscv64
