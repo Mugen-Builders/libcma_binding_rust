@@ -102,13 +102,19 @@ impl Default for LedgerBufferConfig {
 
 /// Safe wrapper around the C ledger
 pub struct Ledger {
-    inner: bindings::cma_ledger_t,
+    // Boxed so the C++ ledger object has a STABLE heap address. The backends
+    // (`cma_ledger_memory`, `cma_ledger_single`) are self-referential — they cache
+    // a `managed_memory &m_memory` bound to their own `m_state` member — so the
+    // `cma_ledger_t` storage must never be relocated after init. Holding it inline
+    // would let a move of `Ledger` (e.g. returning it by value) memcpy the bytes and
+    // dangle that reference; the box keeps the storage put and moves only the pointer.
+    inner: Box<bindings::cma_ledger_t>,
 }
 
 impl Ledger {
     fn restore_empty_ledger(&mut self) {
         unsafe {
-            let _ = bindings::cma_ledger_init(&mut self.inner);
+            let _ = bindings::cma_ledger_init(&mut *self.inner);
         }
     }
 
@@ -117,12 +123,12 @@ impl Ledger {
         init_fn: impl FnOnce(*mut bindings::cma_ledger_t) -> i32,
     ) -> Result<(), LedgerError> {
         unsafe {
-            let fini_result = bindings::cma_ledger_fini(&mut self.inner);
+            let fini_result = bindings::cma_ledger_fini(&mut *self.inner);
             if fini_result < 0 {
                 return Err(LedgerError::from_code(fini_result));
             }
 
-            let init_result = init_fn(&mut self.inner);
+            let init_result = init_fn(&mut *self.inner);
             if init_result < 0 {
                 self.restore_empty_ledger();
                 return Err(LedgerError::from_code(init_result));
@@ -135,19 +141,21 @@ impl Ledger {
     /// Initialize a new ledger
     pub fn new() -> Result<Self, LedgerError> {
         unsafe {
-            let mut ledger = std::mem::zeroed::<bindings::cma_ledger_t>();
-            let result = bindings::cma_ledger_init(&mut ledger);
+            // Allocate the storage on the heap FIRST, then construct the C++ object
+            // in place, so its address is fixed for the lifetime of the `Ledger`.
+            let mut inner = Box::new(std::mem::zeroed::<bindings::cma_ledger_t>());
+            let result = bindings::cma_ledger_init(&mut *inner);
             if result < 0 {
                 return Err(LedgerError::from_code(result));
             }
-            Ok(Ledger { inner: ledger })
+            Ok(Ledger { inner })
         }
     }
 
     /// Reset the ledger
     pub fn reset(&mut self) -> Result<(), LedgerError> {
         unsafe {
-            let result = bindings::cma_ledger_reset(&mut self.inner);
+            let result = bindings::cma_ledger_reset(&mut *self.inner);
             if result < 0 {
                 return Err(LedgerError::from_code(result));
             }
@@ -175,7 +183,7 @@ impl Ledger {
                 .unwrap_or_else(|| bindings::cmt_abi_u256_t { data: [0u8; 32] });
 
             let result = bindings::cma_ledger_retrieve_asset(
-                &mut self.inner,
+                &mut *self.inner,
                 &mut out_asset_id,
                 if token_address.is_some() {
                     &mut out_token_address
@@ -266,7 +274,7 @@ impl Ledger {
             };
 
             let result = bindings::cma_ledger_retrieve_account(
-                &mut self.inner,
+                &mut *self.inner,
                 &mut out_account_id,
                 &mut c_account,
                 addr_ptr,
@@ -310,7 +318,7 @@ impl Ledger {
         unsafe {
             let c_amount = amount.to_c();
             let result = bindings::cma_ledger_deposit(
-                &mut self.inner,
+                &mut *self.inner,
                 asset_id.0,
                 to_account_id.0,
                 &c_amount,
@@ -334,7 +342,7 @@ impl Ledger {
         unsafe {
             let c_amount = amount.to_c();
             let result = bindings::cma_ledger_withdraw(
-                &mut self.inner,
+                &mut *self.inner,
                 asset_id.0,
                 from_account_id.0,
                 &c_amount,
@@ -359,7 +367,7 @@ impl Ledger {
         unsafe {
             let c_amount = amount.to_c();
             let result = bindings::cma_ledger_transfer(
-                &mut self.inner,
+                &mut *self.inner,
                 asset_id.0,
                 from_account_id.0,
                 to_account_id.0,
@@ -383,7 +391,7 @@ impl Ledger {
         unsafe {
             let mut out_balance = std::mem::zeroed::<bindings::cmt_abi_u256_t>();
             let result = bindings::cma_ledger_get_balance(
-                &self.inner as *const _ as *mut _,
+                &*self.inner as *const _ as *mut _,
                 asset_id.0,
                 account_id.0,
                 &mut out_balance,
@@ -405,7 +413,7 @@ impl Ledger {
             let mut asset_type = bindings::cma_ledger_asset_type_t_CMA_LEDGER_ASSET_TYPE_ID;
             let mut out_supply = std::mem::zeroed::<bindings::cma_amount_t>();
             let result = bindings::cma_ledger_retrieve_asset(
-                &self.inner as *const _ as *mut _,
+                &*self.inner as *const _ as *mut _,
                 &mut asset_id_mut,
                 ptr::null_mut(),
                 ptr::null_mut(),
@@ -532,7 +540,7 @@ impl Ledger {
 impl Drop for Ledger {
     fn drop(&mut self) {
         unsafe {
-            bindings::cma_ledger_fini(&mut self.inner);
+            bindings::cma_ledger_fini(&mut *self.inner);
         }
     }
 }
