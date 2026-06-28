@@ -5,28 +5,12 @@ use std::ffi::CString;
 use std::path::Path;
 use std::ptr;
 
-/// Storage mode for file-backed ledgers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LedgerMemoryMode {
-    OpenOnly,
-    CreateOnly,
-}
-
-impl LedgerMemoryMode {
-    fn to_c(self) -> bindings::cma_ledger_memory_mode_t {
-        match self {
-            LedgerMemoryMode::OpenOnly => bindings::cma_ledger_memory_mode_t_CMA_LEDGER_OPEN_ONLY,
-            LedgerMemoryMode::CreateOnly => {
-                bindings::cma_ledger_memory_mode_t_CMA_LEDGER_CREATE_ONLY
-            }
-        }
-    }
-}
-
 /// Configuration for file-backed ledger initialization.
+///
+/// The backing file is now always opened in create-or-open mode: it is created
+/// when missing and validated (size/version) when it already exists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LedgerFileConfig {
-    pub mode: LedgerMemoryMode,
     pub offset: usize,
     pub memory_length: usize,
     pub max_accounts: usize,
@@ -37,12 +21,63 @@ pub struct LedgerFileConfig {
 impl Default for LedgerFileConfig {
     fn default() -> Self {
         Self {
-            mode: LedgerMemoryMode::CreateOnly,
             offset: 0,
             memory_length: 1024 * 1024,
             max_accounts: 256,
             max_assets: 256,
             max_balances: 1024,
+        }
+    }
+}
+
+/// The single, immutable asset that a single-asset ledger tracks.
+///
+/// Chosen once when the ledger is created and fixed for the lifetime of the
+/// backing store. Reopening the same file with a different asset is rejected by
+/// the underlying library.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LedgerAsset {
+    /// The base asset (ether). No token address.
+    Ether,
+    /// A single ERC-20 token, identified by its contract address.
+    Erc20(TokenAddress),
+}
+
+impl LedgerAsset {
+    /// Lower to the C `(asset_type, token_address)` pair. The address is returned
+    /// by value so the caller can keep it alive while passing a pointer to it.
+    fn to_c(self) -> (bindings::cma_ledger_asset_type_t, Option<bindings::cma_token_address_t>) {
+        match self {
+            LedgerAsset::Ether => (
+                bindings::cma_ledger_asset_type_t_CMA_LEDGER_ASSET_TYPE_BASE,
+                None,
+            ),
+            LedgerAsset::Erc20(addr) => (
+                bindings::cma_ledger_asset_type_t_CMA_LEDGER_ASSET_TYPE_TOKEN_ADDRESS,
+                Some(addr.to_c()),
+            ),
+        }
+    }
+}
+
+/// Configuration for file-backed single-asset ledger initialization.
+///
+/// Unlike [`LedgerFileConfig`], a single-asset ledger has no `max_assets`
+/// (there is exactly one) or `max_balances`; `max_accounts` is the capacity of
+/// the withdrawable-balance drive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LedgerSingleFileConfig {
+    pub offset: usize,
+    pub memory_length: usize,
+    pub max_accounts: usize,
+}
+
+impl Default for LedgerSingleFileConfig {
+    fn default() -> Self {
+        Self {
+            offset: 0,
+            memory_length: 1024 * 1024,
+            max_accounts: 256,
         }
     }
 }
@@ -411,7 +446,6 @@ impl Ledger {
             bindings::cma_ledger_init_file(
                 ledger,
                 file_path.as_ptr(),
-                config.mode.to_c(),
                 config.offset,
                 config.memory_length,
                 config.max_accounts,
@@ -435,6 +469,61 @@ impl Ledger {
                 config.max_accounts,
                 config.max_assets,
                 config.max_balances,
+            )
+        })
+    }
+
+    /// Reinitialize this ledger as a single-asset ledger backed by a file
+    /// (create-or-open). The asset (ether or one ERC-20) is fixed for the life
+    /// of the backing file; balances are 64-bit.
+    pub fn init_single_from_file<P: AsRef<Path>>(
+        &mut self,
+        file_path: P,
+        config: LedgerSingleFileConfig,
+        asset: LedgerAsset,
+    ) -> Result<(), LedgerError> {
+        let file_path = CString::new(file_path.as_ref().to_string_lossy().as_bytes())
+            .map_err(|_| LedgerError::Other(-22))?;
+        let (asset_type, token_address) = asset.to_c();
+
+        self.reinitialize(|ledger| unsafe {
+            bindings::cma_ledger_init_single_file(
+                ledger,
+                file_path.as_ptr(),
+                config.offset,
+                config.memory_length,
+                config.max_accounts,
+                asset_type,
+                token_address
+                    .as_ref()
+                    .map(|addr| addr as *const _)
+                    .unwrap_or(ptr::null()),
+            )
+        })
+    }
+
+    /// Reinitialize this ledger as a single-asset ledger over caller-provided
+    /// memory (non-persistent). `max_accounts` is the capacity of the
+    /// withdrawable-balance drive.
+    pub fn init_single_from_buffer(
+        &mut self,
+        buffer: &mut [u8],
+        max_accounts: usize,
+        asset: LedgerAsset,
+    ) -> Result<(), LedgerError> {
+        let (asset_type, token_address) = asset.to_c();
+
+        self.reinitialize(|ledger| unsafe {
+            bindings::cma_ledger_init_single_buffer(
+                ledger,
+                buffer.as_mut_ptr() as *mut _,
+                buffer.len(),
+                max_accounts,
+                asset_type,
+                token_address
+                    .as_ref()
+                    .map(|addr| addr as *const _)
+                    .unwrap_or(ptr::null()),
             )
         })
     }

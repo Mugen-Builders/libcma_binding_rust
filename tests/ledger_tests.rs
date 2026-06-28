@@ -123,6 +123,40 @@ fn test_init_from_buffer_reinitializes_ledger() {
 }
 
 #[test]
+fn test_init_single_from_file_ether() {
+    let mut ledger = Ledger::new().expect("Failed to initialize ledger");
+
+    let path = unique_temp_file_path();
+    let config = LedgerSingleFileConfig::default();
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path)
+        .expect("Should create temp file");
+    file.set_len(config.memory_length as u64)
+        .expect("Should size temp file");
+
+    ledger
+        .init_single_from_file(&path, config, LedgerAsset::Ether)
+        .expect("Single-asset (ether) file-backed initialization should succeed");
+
+    drop(ledger);
+    std::fs::remove_file(path).expect("Should remove temp file");
+}
+
+#[test]
+fn test_init_single_from_buffer_erc20() {
+    let mut ledger = Ledger::new().expect("Failed to initialize ledger");
+
+    let mut buffer = vec![0u8; 1024 * 1024];
+    ledger
+        .init_single_from_buffer(&mut buffer, 256, LedgerAsset::Erc20(test_token_address()))
+        .expect("Single-asset (ERC-20) buffer-backed initialization should succeed");
+}
+
+#[test]
 fn test_create_asset_by_token_address() {
     let mut ledger = Ledger::new().expect("Failed to initialize ledger");
 

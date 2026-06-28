@@ -66,7 +66,6 @@ pub unsafe extern "C" fn cma_ledger_init(ledger: *mut bindings::cma_ledger_t) ->
 pub unsafe extern "C" fn cma_ledger_init_file(
     ledger: *mut bindings::cma_ledger_t,
     memory_file_name: *const std::ffi::c_char,
-    _mode: bindings::cma_ledger_memory_mode_t,
     _offset: usize,
     mem_length: usize,
     _n_accounts: usize,
@@ -74,6 +73,39 @@ pub unsafe extern "C" fn cma_ledger_init_file(
     _n_balances: usize,
 ) -> i32 {
     if ledger.is_null() || memory_file_name.is_null() || mem_length == 0 {
+        return bindings::CMA_LEDGER_ERROR_UNKNOWN as i32;
+    }
+
+    cma_ledger_init(ledger)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn cma_ledger_init_single_file(
+    ledger: *mut bindings::cma_ledger_t,
+    memory_file_name: *const std::ffi::c_char,
+    _offset: usize,
+    mem_length: usize,
+    _n_accounts: usize,
+    _asset_type: bindings::cma_ledger_asset_type_t,
+    _token_address: *const bindings::cma_token_address_t,
+) -> i32 {
+    if ledger.is_null() || memory_file_name.is_null() || mem_length == 0 {
+        return bindings::CMA_LEDGER_ERROR_UNKNOWN as i32;
+    }
+
+    cma_ledger_init(ledger)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn cma_ledger_init_single_buffer(
+    ledger: *mut bindings::cma_ledger_t,
+    buffer: *mut std::ffi::c_void,
+    mem_length: usize,
+    _n_accounts: usize,
+    _asset_type: bindings::cma_ledger_asset_type_t,
+    _token_address: *const bindings::cma_token_address_t,
+) -> i32 {
+    if ledger.is_null() || buffer.is_null() || mem_length == 0 {
         return bindings::CMA_LEDGER_ERROR_UNKNOWN as i32;
     }
 
