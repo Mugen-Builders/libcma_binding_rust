@@ -56,25 +56,42 @@ fn main() {
         .write_to_file(out_dir.join("bindings.rs"))
         .expect("Failed to write bindings");
 
-    // Link the real C++ libcma when not using the native mock.
+    // Link the real C++ libcma when not using the native mock. Two targets:
+    //   - `riscv64`   → cross-compile for the Cartesi machine (default when non-native).
+    //   - `host-real` → compile for the host (x86_64), so an off-chain consumer runs the
+    //                   *same* ledger the machine will. The DEFS in machine-asset-tools force
+    //                   SIMD-free/generic paths so the record bytes match across arches.
     if !cfg!(feature = "native") {
-        let lib_dir = mat.join("build/riscv64");
+        let host = cfg!(feature = "host-real");
+        // Distinct object dirs so a host build and a cross build never clobber each other.
+        let obj_subdir = if host { "build/host" } else { "build/riscv64" };
+        let lib_dir = mat.join(obj_subdir);
         let lib_path = lib_dir.join("libcma.a");
 
         // Build libcma.a from source if it isn't already present. This is what lets the crate be
         // consumed as a plain `git`/`crates.io` dependency WITHOUT vendoring a prebuilt archive.
         //
-        // Build-environment requirements (the Cartesi SDK / app Dockerfile provides these):
+        // Build-environment requirements (the Cartesi SDK / app Dockerfile provide the cross set):
         //   - GNU make, wget, and network access
-        //   - the RISC-V GCC 14 cross toolchain: g++-14-riscv64-linux-gnu / gcc-14-riscv64-linux-gnu
-        //     (libcma's C++ source requires GCC >= 14).
-        // Override the compiler names with CMA_RISCV64_CXX / CMA_RISCV64_CC if your toolchain
-        // differs, or skip this whole path by pre-building build/riscv64/libcma.a yourself.
+        //   - riscv64: the RISC-V GCC 14 cross toolchain (g++-14-riscv64-linux-gnu / gcc-14-…).
+        //   - host-real: a host C++ toolchain with g++ >= 14 (C++20/C++23) and Boost is fetched.
+        // Override the compiler names with CMA_RISCV64_CXX/CC or CMA_HOST_CXX/CC.
         if !lib_path.exists() {
-            let cxx =
-                env::var("CMA_RISCV64_CXX").unwrap_or_else(|_| "riscv64-linux-gnu-g++-14".into());
-            let cc =
-                env::var("CMA_RISCV64_CC").unwrap_or_else(|_| "riscv64-linux-gnu-gcc-14".into());
+            let (toolchain_prefix, cxx, cc, ar) = if host {
+                (
+                    String::new(),
+                    env::var("CMA_HOST_CXX").unwrap_or_else(|_| "g++".into()),
+                    env::var("CMA_HOST_CC").unwrap_or_else(|_| "gcc".into()),
+                    "ar".to_string(),
+                )
+            } else {
+                (
+                    "riscv64-linux-gnu-".to_string(),
+                    env::var("CMA_RISCV64_CXX").unwrap_or_else(|_| "riscv64-linux-gnu-g++-14".into()),
+                    env::var("CMA_RISCV64_CC").unwrap_or_else(|_| "riscv64-linux-gnu-gcc-14".into()),
+                    "riscv64-linux-gnu-ar".to_string(),
+                )
+            };
 
             // machine-asset-tools' `third-party` target fetches Boost/emulator/guest-tools but not
             // nlohmann/json, so fetch that single header first.
@@ -92,16 +109,19 @@ fn main() {
                 );
             }
 
-            // Download + stage the third-party deps, then cross-compile the static archive.
-            run("make", &["third-party", "TOOLCHAIN_PREFIX=riscv64-linux-gnu-"], &mat);
+            // Download + stage the third-party deps, then compile the static archive. The Makefile
+            // hardcodes `libcma_OBJDIR := build/riscv64`; override it so the host build lands in its
+            // own dir (command-line assignments beat the Makefile's `:=`).
+            run("make", &["third-party", &format!("TOOLCHAIN_PREFIX={toolchain_prefix}")], &mat);
             run(
                 "make",
                 &[
-                    "build/riscv64/libcma.a",
-                    "TOOLCHAIN_PREFIX=riscv64-linux-gnu-",
+                    &format!("{obj_subdir}/libcma.a"),
+                    &format!("libcma_OBJDIR={obj_subdir}"),
+                    &format!("TOOLCHAIN_PREFIX={toolchain_prefix}"),
                     &format!("CXX={cxx}"),
                     &format!("CC={cc}"),
-                    "AR=riscv64-linux-gnu-ar",
+                    &format!("AR={ar}"),
                 ],
                 &mat,
             );

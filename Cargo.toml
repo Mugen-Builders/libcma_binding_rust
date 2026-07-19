@@ -26,4 +26,9 @@ bindgen = "0.69"
 [features]
 default = ["native"]
 native = ["lazy_static"] # Mac testing with mocks
-riscv64 = []             # Cross-build later
+riscv64 = []             # Cross-build the real C++ libcma for the Cartesi machine (riscv64)
+# Build the real C++ libcma for the HOST (x86_64) and link it instead of the mock.
+# Used off-chain (e.g. by a sequencer predicting the machine's ledger): the DEFS in
+# machine-asset-tools force generic, SIMD-free code paths so the 32-byte account records
+# are byte-identical to the riscv64 build — the property that makes host prediction sound.
+host-real = []
