@@ -15,13 +15,20 @@
 //! `third_party/machine-asset-tools/src/ledger_impl.h`:
 //!
 //! ```c
+//! // Drive record format v2 (machine-asset-tools e4bfc24): the withdrawable balance was
+//! // widened from uint64 to uint96, consuming the former padding. The owner therefore moved
+//! // from offset 8 to offset 12, and there is no trailing pad.
 //! struct alignas(32) cma_ledger_single_balance {
-//!     uint64_t balance;          // bytes  0..8   little-endian (interprocess.hpp asserts LE)
-//!     cma_abi_address_t address; // bytes  8..28  20-byte owner wallet address
-//!     uint8_t padding[4];        // bytes 28..32  zero pad to a 32-byte power-of-two record
+//!     uint64_t balance_lo;       // bytes  0..8   low 64 bits, little-endian
+//!     uint32_t balance_hi;       // bytes  8..12  high 32 bits, little-endian (uint96 = hi<<64 | lo)
+//!     cma_abi_address_t address; // bytes 12..32  20-byte owner wallet address
 //! };
 //! static_assert(sizeof(cma_ledger_single_balance) == 32);
+//! static_assert(offsetof(cma_ledger_single_balance, address) == 12);
 //! ```
+//!
+//! NOTE (drive format v2): `MemoryFooter::VERSION` is now 2 — a v1 drive (uint64 balance, owner
+//! at offset 8, 4-byte pad) is NOT compatible and would be silently misread by this format.
 #![cfg(feature = "host-real")]
 
 use libcma_binding_rust::ledger::{Ledger, LedgerAsset};
@@ -31,11 +38,18 @@ const MEM_LEN: usize = 4 * 1024 * 1024;
 const MAX_ACCOUNTS: usize = 4096;
 const RECORDS_PREFIX: usize = MAX_ACCOUNTS * 32; // 128 KiB proven records region
 
-// Record byte layout (see module docs / ledger_impl.h). These offsets are the invariant.
+// Record byte layout v2 (see module docs / ledger_impl.h). These offsets are the invariant.
 const RECORD_SIZE: usize = 32;
-const BALANCE_RANGE: std::ops::Range<usize> = 0..8; // u64 little-endian
-const OWNER_RANGE: std::ops::Range<usize> = 8..28; // 20-byte owner address
-const PAD_RANGE: std::ops::Range<usize> = 28..32; // 4-byte zero pad
+const BALANCE_LO_RANGE: std::ops::Range<usize> = 0..8; // low 64 bits, little-endian
+const BALANCE_HI_RANGE: std::ops::Range<usize> = 8..12; // high 32 bits, little-endian
+const OWNER_RANGE: std::ops::Range<usize> = 12..32; // 20-byte owner address
+
+/// Decode the uint96 balance from a record: `hi << 64 | lo` (both little-endian).
+fn record_balance(rec: &[u8]) -> u128 {
+    let lo = u64::from_le_bytes(rec[BALANCE_LO_RANGE].try_into().unwrap()) as u128;
+    let hi = u32::from_le_bytes(rec[BALANCE_HI_RANGE].try_into().unwrap()) as u128;
+    (hi << 64) | lo
+}
 
 fn token() -> Address {
     "0x88A2120B7068E78692C8fd12E751d610B6377E4d"
@@ -72,7 +86,7 @@ fn build_ledger(buf: &mut [u8], credits: &[(Address, u64)]) {
     }
 }
 
-/// Return the 32-byte record in `buf`'s records prefix whose owner field (bytes 8..28)
+/// Return the 32-byte record in `buf`'s records prefix whose owner field (bytes 12..32)
 /// equals `owner`, or `None` if no such record exists.
 fn find_record(buf: &[u8], owner: Address) -> Option<&[u8]> {
     let want = owner.0 .0;
@@ -81,9 +95,10 @@ fn find_record(buf: &[u8], owner: Address) -> Option<&[u8]> {
         .find(|rec| rec[OWNER_RANGE] == want)
 }
 
-/// Each credited account's 32-byte record is exactly `balance(u64 LE) | owner(20) | pad(4)`.
+/// Each credited account's 32-byte record is exactly `balance_lo(u64 LE) | balance_hi(u32 LE) |
+/// owner(20)` — a uint96 balance followed by the 20-byte owner, with no trailing pad (format v2).
 #[test]
-fn record_layout_is_balance_owner_pad() {
+fn record_layout_is_balance96_and_owner() {
     let credits = [(alice(), 250u64), (bob(), 70u64)];
 
     let mut buf = vec![0u8; MEM_LEN];
@@ -95,20 +110,17 @@ fn record_layout_is_balance_owner_pad() {
         });
         eprintln!("record for {owner:?} = {}", hex::encode(rec));
 
-        // balance: u64, little-endian, bytes 0..8
-        let got = u64::from_le_bytes(rec[BALANCE_RANGE].try_into().unwrap());
-        assert_eq!(got, bal, "balance field (u64 LE) mismatch for {owner:?}");
-
-        // owner: 20-byte address, bytes 8..28
+        // balance: uint96, little-endian (low 64 bits bytes 0..8, high 32 bits bytes 8..12)
         assert_eq!(
-            rec[OWNER_RANGE], owner.0 .0,
-            "owner field (bytes 8..28) mismatch for {owner:?}"
+            record_balance(rec),
+            bal as u128,
+            "balance field (uint96 LE) mismatch for {owner:?}"
         );
 
-        // pad: 4 zero bytes, bytes 28..32
+        // owner: 20-byte address, bytes 12..32
         assert_eq!(
-            rec[PAD_RANGE], [0u8; 4],
-            "trailing pad (bytes 28..32) must be zero for {owner:?}"
+            rec[OWNER_RANGE], owner.0 .0,
+            "owner field (bytes 12..32) mismatch for {owner:?}"
         );
     }
 }

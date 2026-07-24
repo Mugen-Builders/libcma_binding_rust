@@ -21,6 +21,19 @@ While the crate is pre-1.0 (`0.0.x`), any release may contain breaking changes.
   `SECURITY.md`, `deny.toml`, `rust-toolchain.toml`, and `rustfmt.toml`.
 
 ### Changed
+- **Vendored `libcma` bumped to the uint96 single-asset format (drive format v2;
+  machine-asset-tools `e4bfc24`).** The single-asset drive record widened its
+  balance from `uint64` to `uint96`, consuming the former 4-byte pad: the 32-byte
+  record is now `balance_lo (u64 LE) | balance_hi (u32 LE) | owner (20B)`, with the
+  owner moved from offset 8 to **offset 12**. Total supply and virtual (internal
+  account-id) balances widened to full 256-bit. The public C API (and therefore the
+  Rust wrapper surface) is UNCHANGED — deposits/withdrawals/balances already used
+  256-bit `cma_amount_t` at the boundary; only code that parses the raw 32-byte
+  records must adopt the new offsets. **The on-drive format is not backward
+  compatible** (`MemoryFooter::VERSION` 1 → 2): a v1 drive would be silently
+  misread. Downstream that reads the records image directly (e.g. a sequencer's
+  `create_dump` / snapshot parser and the emergency-withdrawal output builder) MUST
+  be updated to the offset-12 owner and uint96 balance.
 - **BREAKING: reshaped the ledger API around a single-asset ledger.** Removed
   `LedgerMemoryMode` and reshaped `LedgerFileConfig`. Code that constructed a
   ledger via the old memory-mode / file-config shape must be updated.

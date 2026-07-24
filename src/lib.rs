@@ -27,7 +27,8 @@
 //! `host-real` and `riscv64` compile libcma with SIMD-free / generic flags
 //! (`-DBOOST_UNORDERED_DISABLE_SSE2`, `-DBOOST_UNORDERED_DISABLE_NEON`,
 //! `-DBOOST_INTERPROCESS_FORCE_GENERIC_EMULATION`) so the on-disk 32-byte account
-//! records (`balance` u64 little-endian | `owner` 20 bytes | 4 bytes padding) are
+//! records (single-asset drive format v2: `balance` uint96 little-endian [low u64 |
+//! high u32] | `owner` 20 bytes, no padding) are
 //! byte-identical across x86_64 and riscv64. That invariant is what makes
 //! off-chain prediction with `host-real` sound: the host reproduces, byte for
 //! byte, exactly what the machine computes on-chain.
