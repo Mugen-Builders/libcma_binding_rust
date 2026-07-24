@@ -1,6 +1,6 @@
 use crate::bindings;
 // use std::fmt;
-pub use ethers_core::types::{Address, U256};
+pub use alloy_primitives::{Address, U256};
 use std::str::FromStr;
 
 pub const ADDRESS_LENGTH: usize = 20;
@@ -41,15 +41,17 @@ impl AddressCBindingsExt for Address {
     }
 
     fn as_array(&self) -> [u8; ADDRESS_LENGTH] {
-        self.0
+        self.0 .0
     }
 
     fn as_bytes(&self) -> &[u8; ADDRESS_LENGTH] {
-        &self.0
+        &self.0 .0
     }
 
     fn to_c(&self) -> bindings::cmt_abi_address_t {
-        bindings::cmt_abi_address_t { data: self.as_array() }
+        bindings::cmt_abi_address_t {
+            data: self.as_array(),
+        }
     }
 
     fn from_c(c_addr: &bindings::cmt_abi_address_t) -> Self {
@@ -81,11 +83,11 @@ pub trait U256CBindingsExt {
 
 impl U256CBindingsExt for U256 {
     fn new(bytes: [u8; U256_LENGTH]) -> Self {
-        U256::from_big_endian(&bytes)
+        U256::from_be_slice(&bytes)
     }
 
     fn zero() -> Self {
-        U256::zero()
+        U256::ZERO
     }
 
     fn from_u64(value: u64) -> Self {
@@ -93,36 +95,37 @@ impl U256CBindingsExt for U256 {
     }
 
     fn from_be_bytes(bytes: [u8; U256_LENGTH]) -> Self {
-        U256::from_big_endian(&bytes)
+        U256::from_be_slice(&bytes)
     }
 
     fn from_slice(slice: &[u8]) -> Result<Self, String> {
         if slice.len() != U256_LENGTH {
             return Err(format!("U256 must be 32 bytes, got {}", slice.len()));
         }
-        Ok(U256::from_big_endian(slice))
+        Ok(U256::from_be_slice(slice))
     }
 
     fn as_be_bytes(&self) -> [u8; U256_LENGTH] {
-        let mut out = [0u8; U256_LENGTH];
-        self.to_big_endian(&mut out);
-        out
+        self.to_be_bytes::<U256_LENGTH>()
     }
 
     fn to_u128_opt(&self) -> Option<u128> {
-        if self.bits() > 128 {
+        // `bit_len` counts significant bits; > 128 means it won't fit a u128.
+        if self.bit_len() > 128 {
             None
         } else {
-            Some(self.low_u128())
+            Some(self.to::<u128>())
         }
     }
 
     fn to_c(&self) -> bindings::cmt_abi_u256_t {
-        bindings::cmt_abi_u256_t { data: self.as_be_bytes() }
+        bindings::cmt_abi_u256_t {
+            data: self.as_be_bytes(),
+        }
     }
 
     fn from_c(c_u256: &bindings::cmt_abi_u256_t) -> Self {
-        U256::from_big_endian(&c_u256.data)
+        U256::from_be_slice(&c_u256.data)
     }
 }
 
@@ -227,9 +230,7 @@ pub struct OwnedCBytes {
 
 impl OwnedCBytes {
     pub fn new(data: impl Into<Vec<u8>>) -> Self {
-        Self {
-            inner: data.into(),
-        }
+        Self { inner: data.into() }
     }
 
     pub fn as_c_bytes(&self) -> bindings::cmt_abi_bytes_t {

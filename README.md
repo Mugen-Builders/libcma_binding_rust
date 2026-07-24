@@ -45,14 +45,58 @@ The Cartesi SDK / app Docker image used to build the machine already provides al
 
 ## Feature flags
 
-| Feature   | Default | Purpose |
-| --------- | ------- | ------- |
-| `native`  | yes     | Compiles `src/mocks.rs` shims so host tests run without the RISC-V `libcma` archive |
-| `riscv64` | no      | Cross-build path that links the real C++ `cma` library; `build.rs` cross-compiles `build/riscv64/libcma.a` from the submodule source if it isn't already present (needs the RISC-V GCC 14 cross toolchain) |
+The crate has **three mutually exclusive backends**. Exactly one must be enabled;
+enabling zero or more than one is a hard `compile_error!` (enforced at the top of
+`src/lib.rs`).
+
+| Feature     | Default | Real libcma?             | When to use |
+| ----------- | ------- | ------------------------ | ----------- |
+| `mock`      | yes     | No — in-memory **stub**  | Host development and `cargo test`: compiles the thread-local stubs in `src/mocks.rs` so the crate builds and the plumbing/parser tests run with no C++ toolchain, no network, and no RISC-V archive. **Never use in production — it is not a real ledger.** |
+| `host-real` | no      | Yes (host, x86_64)       | Running the **real** C++ `libcma` off-chain on the host, e.g. a sequencer predicting the Cartesi machine's ledger state. `build.rs` builds and links the real static archive for the host. |
+| `riscv64`   | no      | Yes (Cartesi machine)    | Running the **real** C++ `libcma` **inside** the Cartesi machine. `build.rs` cross-compiles `build/riscv64/libcma.a` from the submodule source if it isn't already present (needs the RISC-V GCC 14 cross toolchain). |
+
+### Selecting a real backend (important footgun)
+
+The backends are mutually exclusive **and** `mock` is a default feature, so the
+link gate in `build.rs` keys off `mock`. To build against the real `libcma` you
+MUST also turn default features off — otherwise the default `mock` stays enabled
+and you silently link the stub instead of the real ledger:
 
 ```bash
+# real libcma on the host (off-chain, e.g. sequencer prediction)
+cargo build --no-default-features --features host-real
+
+# real libcma cross-compiled for the Cartesi machine
 cargo build --no-default-features --features riscv64
 ```
+
+In `Cargo.toml`:
+
+```toml
+libcma_binding_rust = { version = "...", default-features = false, features = ["host-real"] }  # or "riscv64"
+```
+
+If you forget `default-features = false`, enabling `host-real` or `riscv64`
+alongside the default `mock` trips the mutual-exclusivity `compile_error!` — read
+its message; the fix is to disable default features.
+
+### Determinism / reproducibility
+
+`host-real` and `riscv64` compile the C++ `libcma` with SIMD-free / generic flags
+(`-DBOOST_UNORDERED_DISABLE_SSE2`, `-DBOOST_UNORDERED_DISABLE_NEON`,
+`-DBOOST_INTERPROCESS_FORCE_GENERIC_EMULATION`). This makes the on-disk 32-byte
+account records (`balance` u64 little-endian | `owner` 20 bytes | 4 bytes
+padding) **byte-identical** across x86_64 and riscv64. That invariant is what
+makes off-chain prediction with `host-real` sound: the host reproduces, byte for
+byte, exactly what the machine computes on-chain.
+
+### Thread safety
+
+`Ledger` wraps a self-referential C++ object (Boost.Interprocess) held on the
+heap for relocation safety, and is therefore **`!Send` / `!Sync`**. Do not move
+or share a `Ledger` across threads without external synchronization. Downstream
+code that needs `Send` typically wraps the `Ledger` in a mutex together with its
+own `unsafe impl Send`.
 
 ## Ledger wrapper
 
@@ -93,9 +137,9 @@ cargo test
 
 - `tests/parser_tests.rs` — integration tests against the pure-Rust parser
 - `tests/parser_vectors.rs` — vectors ported from `third_party/machine-asset-tools/tests/parser.c`
-- `tests/ledger_tests.rs` — ledger tests via native mocks
+- `tests/ledger_tests.rs` — ledger tests via the `mock` backend
 
-CI runs native tests on every push/PR and attempts an riscv64 link check when `libcma` can be built.
+CI runs the `mock`-backend tests on every push/PR and attempts an riscv64 link check when `libcma` can be built.
 
 ## License
 

@@ -1,3 +1,28 @@
+//! Safe Rust wrapper around the C++ `libcma` ledger.
+//!
+//! # Backends
+//!
+//! Exactly one backend feature is compiled in (they are mutually exclusive; see
+//! the `compile_error!` guards in `lib.rs`):
+//!
+//! - **`mock`** (default) — an in-memory **stub** ledger (`src/mocks.rs`). Needs
+//!   no C++ toolchain or network; for compile/plumbing tests only. It is **not**
+//!   real libcma and must never be used in production.
+//! - **`host-real`** — the real C++ libcma built for the host (x86_64), used
+//!   off-chain (e.g. a sequencer predicting the Cartesi machine's ledger).
+//! - **`riscv64`** — the real C++ libcma cross-compiled to run inside the
+//!   Cartesi machine.
+//!
+//! # Reproducibility invariant
+//!
+//! `host-real` and `riscv64` build libcma with SIMD-free / generic flags
+//! (`-DBOOST_UNORDERED_DISABLE_SSE2`, `-DBOOST_UNORDERED_DISABLE_NEON`,
+//! `-DBOOST_INTERPROCESS_FORCE_GENERIC_EMULATION`) so the on-disk 32-byte account
+//! records (`balance` u64 little-endian | `owner` 20 bytes | 4 bytes padding) are
+//! byte-identical across x86_64 and riscv64. This is what makes off-chain
+//! prediction with `host-real` sound: the host reproduces, byte for byte,
+//! exactly what the machine computes on-chain.
+
 use crate::bindings;
 use crate::error::LedgerError;
 use crate::types::*;
@@ -46,7 +71,12 @@ pub enum LedgerAsset {
 impl LedgerAsset {
     /// Lower to the C `(asset_type, token_address)` pair. The address is returned
     /// by value so the caller can keep it alive while passing a pointer to it.
-    fn to_c(self) -> (bindings::cma_ledger_asset_type_t, Option<bindings::cma_token_address_t>) {
+    fn to_c(
+        self,
+    ) -> (
+        bindings::cma_ledger_asset_type_t,
+        Option<bindings::cma_token_address_t>,
+    ) {
         match self {
             LedgerAsset::Ether => (
                 bindings::cma_ledger_asset_type_t_CMA_LEDGER_ASSET_TYPE_BASE,
@@ -100,7 +130,17 @@ impl Default for LedgerBufferConfig {
     }
 }
 
-/// Safe wrapper around the C ledger
+/// Safe wrapper around the C++ `libcma` ledger.
+///
+/// # Thread safety
+///
+/// `Ledger` wraps a self-referential C++ object (Boost.Interprocess): the
+/// backend caches an internal reference bound to its own storage, so the object
+/// is heap-pinned via [`Box`] to keep its address stable across moves. As a
+/// consequence `Ledger` is **`!Send`** and **`!Sync`** — it must not be moved or
+/// shared across threads without external synchronization. Downstream code that
+/// needs `Send` typically wraps the `Ledger` in a mutex together with its own
+/// `unsafe impl Send`.
 pub struct Ledger {
     // Boxed so the C++ ledger object has a STABLE heap address. The backends
     // (`cma_ledger_memory`, `cma_ledger_single`) are self-referential — they cache
@@ -406,7 +446,7 @@ impl Ledger {
         }
     }
 
-    /// Get total supply for an asset (via [`cma_ledger_retrieve_asset`] with find).
+    /// Get total supply for an asset (via `cma_ledger_retrieve_asset` with find).
     pub fn get_total_supply(&self, asset_id: LedgerAssetId) -> Result<U256, LedgerError> {
         unsafe {
             let mut asset_id_mut = asset_id.0;

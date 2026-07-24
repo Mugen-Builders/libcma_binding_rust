@@ -25,13 +25,19 @@ const MAX_ACCOUNTS: usize = 4096;
 const RECORDS_PREFIX: usize = MAX_ACCOUNTS * 32; // 128 KiB proven region
 
 fn token() -> Address {
-    "0x88A2120B7068E78692C8fd12E751d610B6377E4d".parse().unwrap()
+    "0x88A2120B7068E78692C8fd12E751d610B6377E4d"
+        .parse()
+        .unwrap()
 }
 fn alice() -> Address {
-    "0x1111111111111111111111111111111111111111".parse().unwrap()
+    "0x1111111111111111111111111111111111111111"
+        .parse()
+        .unwrap()
 }
 fn bob() -> Address {
-    "0x2222222222222222222222222222222222222222".parse().unwrap()
+    "0x2222222222222222222222222222222222222222"
+        .parse()
+        .unwrap()
 }
 
 /// Real libcma links and computes balances on the host (i.e. we are NOT on the mock).
@@ -43,9 +49,15 @@ fn real_libcma_links_and_computes_balances_on_host() {
         .init_single_from_buffer(&mut buf, MAX_ACCOUNTS, LedgerAsset::Erc20(token()))
         .expect("init single buffer");
 
-    let asset = ledger.retrieve_erc20_asset_via_address(token()).expect("asset");
-    let account = ledger.retrieve_account_via_address(alice()).expect("account");
-    ledger.deposit(asset, account, U256::from(100)).expect("deposit");
+    let asset = ledger
+        .retrieve_erc20_asset_via_address(token())
+        .expect("asset");
+    let account = ledger
+        .retrieve_account_via_address(alice())
+        .expect("account");
+    ledger
+        .deposit(asset, account, U256::from(100))
+        .expect("deposit");
 
     assert_eq!(
         ledger.get_balance(asset, account).expect("balance"),
@@ -63,12 +75,18 @@ fn records_prefix_holds_owner_and_balance() {
     ledger
         .init_single_from_buffer(&mut buf, MAX_ACCOUNTS, LedgerAsset::Erc20(token()))
         .expect("init single buffer");
-    let asset = ledger.retrieve_erc20_asset_via_address(token()).expect("asset");
-    let acc = ledger.retrieve_account_via_address(alice()).expect("account");
-    ledger.deposit(asset, acc, U256::from(250)).expect("deposit");
+    let asset = ledger
+        .retrieve_erc20_asset_via_address(token())
+        .expect("asset");
+    let acc = ledger
+        .retrieve_account_via_address(alice())
+        .expect("account");
+    ledger
+        .deposit(asset, acc, U256::from(250))
+        .expect("deposit");
 
     // Scan the 128 KiB records prefix (32-byte strides) for alice's address bytes.
-    let addr = alice().to_fixed_bytes();
+    let addr = alice().0 .0;
     let mut found = None;
     for (i, rec) in buf[..RECORDS_PREFIX].chunks_exact(32).enumerate() {
         if rec.windows(20).any(|w| w == addr) {
@@ -98,7 +116,8 @@ fn restore_by_recredit_round_trips() {
     let a1 = l1.retrieve_erc20_asset_via_address(token).expect("asset");
     let alice_id = l1.retrieve_account_via_address(alice()).expect("alice");
     let bob_id = l1.retrieve_account_via_address(bob()).expect("bob");
-    l1.deposit(a1, alice_id, U256::from(250)).expect("dep alice");
+    l1.deposit(a1, alice_id, U256::from(250))
+        .expect("dep alice");
     l1.deposit(a1, bob_id, U256::from(70)).expect("dep bob");
     let supply1 = l1.get_total_supply(a1).expect("supply1");
 
@@ -119,7 +138,10 @@ fn restore_by_recredit_round_trips() {
     // Balances and total supply match the original.
     let alice2 = l2.retrieve_account_via_address(alice()).expect("alice2");
     let bob2 = l2.retrieve_account_via_address(bob()).expect("bob2");
-    assert_eq!(l2.get_balance(a2, alice2).expect("bal alice2"), U256::from(250));
+    assert_eq!(
+        l2.get_balance(a2, alice2).expect("bal alice2"),
+        U256::from(250)
+    );
     assert_eq!(l2.get_balance(a2, bob2).expect("bal bob2"), U256::from(70));
     assert_eq!(l2.get_total_supply(a2).expect("supply2"), supply1);
 

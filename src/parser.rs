@@ -1,11 +1,110 @@
 use crate::helpers::hex_to_string;
-use ethers_core::abi::{ParamType, Token, decode, encode};
-use ethers_core::types::{Address, Bytes, U256};
-use ethers_core::utils::{id, to_checksum};
+use alloy_primitives::{Address, Bytes, U256};
 
 use hex;
 use json::JsonValue;
 use std::cell::RefCell;
+
+use self::abi_compat::{decode, encode, id, to_checksum, ParamType, Token};
+
+/// Minimal `ethers_core::abi`-shaped adapter over `alloy-dyn-abi`, covering only the ABI
+/// variants this parser uses (`Uint(256)`, `Bytes`, `Address`, `Array`). ethers-rs is EOL;
+/// `encode`/`decode` map to alloy's `abi_encode_params`/`abi_decode_params`, the byte-for-byte
+/// equivalents of ethers' free `encode`/`decode` — the parser's ABI test vectors pin this.
+mod abi_compat {
+    use alloy_dyn_abi::{DynSolType, DynSolValue};
+    use alloy_primitives::{keccak256, Address, U256};
+
+    #[derive(Clone, Debug)]
+    pub enum ParamType {
+        Uint(usize),
+        Bytes,
+        Address,
+        Array(Box<ParamType>),
+    }
+
+    #[derive(Clone, Debug)]
+    pub enum Token {
+        Uint(U256),
+        Bytes(Vec<u8>),
+        Address(Address),
+        Array(Vec<Token>),
+    }
+
+    impl ParamType {
+        fn to_dyn(&self) -> DynSolType {
+            match self {
+                ParamType::Uint(bits) => DynSolType::Uint(*bits),
+                ParamType::Bytes => DynSolType::Bytes,
+                ParamType::Address => DynSolType::Address,
+                ParamType::Array(inner) => DynSolType::Array(Box::new(inner.to_dyn())),
+            }
+        }
+    }
+
+    impl Token {
+        fn to_dyn(&self) -> DynSolValue {
+            match self {
+                Token::Uint(v) => DynSolValue::Uint(*v, 256),
+                Token::Bytes(b) => DynSolValue::Bytes(b.clone()),
+                Token::Address(a) => DynSolValue::Address(*a),
+                Token::Array(items) => {
+                    DynSolValue::Array(items.iter().map(Token::to_dyn).collect())
+                }
+            }
+        }
+
+        fn from_dyn(value: &DynSolValue) -> Option<Token> {
+            match value {
+                DynSolValue::Uint(v, _) => Some(Token::Uint(*v)),
+                DynSolValue::Bytes(b) => Some(Token::Bytes(b.clone())),
+                DynSolValue::Address(a) => Some(Token::Address(*a)),
+                DynSolValue::Array(items) | DynSolValue::FixedArray(items) => items
+                    .iter()
+                    .map(Token::from_dyn)
+                    .collect::<Option<Vec<_>>>()
+                    .map(Token::Array),
+                _ => None,
+            }
+        }
+    }
+
+    /// ABI-encode tokens as top-level params — equivalent of ethers `encode(&[Token])`.
+    pub fn encode(tokens: &[Token]) -> Vec<u8> {
+        DynSolValue::Tuple(tokens.iter().map(Token::to_dyn).collect()).abi_encode_params()
+    }
+
+    /// Opaque decode error; call sites only map it to their own error type.
+    #[derive(Debug)]
+    pub struct AbiDecodeError;
+
+    /// ABI-decode top-level params — equivalent of ethers `decode(&[ParamType], data)`.
+    pub fn decode(types: &[ParamType], data: &[u8]) -> Result<Vec<Token>, AbiDecodeError> {
+        let tuple_ty = DynSolType::Tuple(types.iter().map(ParamType::to_dyn).collect());
+        match tuple_ty
+            .abi_decode_params(data)
+            .map_err(|_| AbiDecodeError)?
+        {
+            DynSolValue::Tuple(items) => items
+                .iter()
+                .map(Token::from_dyn)
+                .collect::<Option<Vec<_>>>()
+                .ok_or(AbiDecodeError),
+            _ => Err(AbiDecodeError),
+        }
+    }
+
+    /// 4-byte function selector — equivalent of `ethers_core::utils::id`.
+    pub fn id(signature: &str) -> [u8; 4] {
+        let hash = keccak256(signature.as_bytes());
+        [hash[0], hash[1], hash[2], hash[3]]
+    }
+
+    /// Checksummed address string — equivalent of `ethers_core::utils::to_checksum`.
+    pub fn to_checksum(address: &Address, chain_id: Option<u64>) -> String {
+        address.to_checksum(chain_id)
+    }
+}
 
 thread_local! {
     static LAST_PARSER_ERROR: RefCell<String> = RefCell::new(String::new());
@@ -19,8 +118,7 @@ fn payload_bytes(input: &JsonValue) -> Result<Vec<u8>, CmaParserError> {
     let payload_hex = input["data"]["payload"]
         .as_str()
         .ok_or(CmaParserError::MalformedInput)?;
-    hex::decode(payload_hex.trim_start_matches("0x"))
-        .map_err(|_| CmaParserError::MalformedInput)
+    hex::decode(payload_hex.trim_start_matches("0x")).map_err(|_| CmaParserError::MalformedInput)
 }
 
 fn require_len(bytes: &[u8], min: usize) -> Result<(), CmaParserError> {
@@ -35,11 +133,8 @@ fn decode_abi_tail_two_bytes(tail: &[u8]) -> Result<(Bytes, Bytes), CmaParserErr
     if tail.is_empty() {
         return Ok((Bytes::from(vec![]), Bytes::from(vec![])));
     }
-    let decoded = decode(
-        &[ParamType::Bytes, ParamType::Bytes],
-        tail,
-    )
-    .map_err(|_| CmaParserError::MalformedInput)?;
+    let decoded = decode(&[ParamType::Bytes, ParamType::Bytes], tail)
+        .map_err(|_| CmaParserError::MalformedInput)?;
     let base = match &decoded[0] {
         Token::Bytes(b) => Bytes::from(b.clone()),
         _ => return Err(CmaParserError::MalformedInput),
@@ -128,7 +223,7 @@ fn parse_hex_account_id(value: &str) -> Result<U256, CmaParserError> {
         return Err(CmaParserError::MalformedInput);
     }
     bytes[offset..offset + decoded.len()].copy_from_slice(&decoded);
-    Ok(U256::from_big_endian(&bytes))
+    Ok(U256::from_be_slice(&bytes))
 }
 
 fn parse_hex_token_id(value: &str) -> Result<U256, CmaParserError> {
@@ -150,7 +245,7 @@ fn parse_hex_token_id(value: &str) -> Result<U256, CmaParserError> {
         return Err(CmaParserError::MalformedInput);
     }
     bytes[offset..offset + decoded.len()].copy_from_slice(&decoded);
-    Ok(U256::from_big_endian(&bytes))
+    Ok(U256::from_be_slice(&bytes))
 }
 
 fn parse_token_address(value: &str) -> Result<Address, CmaParserError> {
@@ -196,7 +291,7 @@ pub enum TxHexCodes {
     TransferErc1155Single = 0xe1c913ed,
     // Bytecode for solidity TransferErc1155Batch(address,bytes32,uint256[],uint256[],bytes) = 638ac6f9
     TransferErc1155Batch = 0x638ac6f9,
-    Unidentified
+    Unidentified,
 }
 
 impl TxHexCodes {
@@ -212,7 +307,7 @@ impl TxHexCodes {
             Self::TransferErc721 => "0xaf615a5a",
             Self::TransferErc1155Single => "0xe1c913ed",
             Self::TransferErc1155Batch => "0x638ac6f9",
-            Self::Unidentified => "0x00000000"
+            Self::Unidentified => "0x00000000",
         }
     }
 
@@ -237,13 +332,21 @@ impl TxHexCodes {
             Self::WithdrawEther => CmaParserInputType::CmaParserInputTypeEtherWithdrawal,
             Self::WithdrawErc20 => CmaParserInputType::CmaParserInputTypeErc20Withdrawal,
             Self::WithdrawErc721 => CmaParserInputType::CmaParserInputTypeErc721Withdrawal,
-            Self::WithdrawErc1155Single => CmaParserInputType::CmaParserInputTypeErc1155SingleWithdrawal,
-            Self::WithdrawErc1155Batch => CmaParserInputType::CmaParserInputTypeErc1155BatchWithdrawal,
+            Self::WithdrawErc1155Single => {
+                CmaParserInputType::CmaParserInputTypeErc1155SingleWithdrawal
+            }
+            Self::WithdrawErc1155Batch => {
+                CmaParserInputType::CmaParserInputTypeErc1155BatchWithdrawal
+            }
             Self::TransferEther => CmaParserInputType::CmaParserInputTypeEtherTransfer,
             Self::TransferErc20 => CmaParserInputType::CmaParserInputTypeErc20Transfer,
             Self::TransferErc721 => CmaParserInputType::CmaParserInputTypeErc721Transfer,
-            Self::TransferErc1155Single => CmaParserInputType::CmaParserInputTypeErc1155SingleTransfer,
-            Self::TransferErc1155Batch => CmaParserInputType::CmaParserInputTypeErc1155BatchTransfer,
+            Self::TransferErc1155Single => {
+                CmaParserInputType::CmaParserInputTypeErc1155SingleTransfer
+            }
+            Self::TransferErc1155Batch => {
+                CmaParserInputType::CmaParserInputTypeErc1155BatchTransfer
+            }
             Self::Unidentified => CmaParserInputType::CmaParserInputTypeUnidentified,
         }
     }
@@ -304,7 +407,9 @@ impl CmaParserInputType {
             "Erc721Transfer" => CmaParserInputType::CmaParserInputTypeErc721Transfer,
             "Erc1155SingleTransfer" => CmaParserInputType::CmaParserInputTypeErc1155SingleTransfer,
             "Erc1155BatchTransfer" => CmaParserInputType::CmaParserInputTypeErc1155BatchTransfer,
-            "ledger_getBalance" | "ledgerGetBalance" => CmaParserInputType::CmaParserInputTypeBalance,
+            "ledger_getBalance" | "ledgerGetBalance" => {
+                CmaParserInputType::CmaParserInputTypeBalance
+            }
             "ledger_getTotalSupply" | "ledgerGetTotalSupply" => {
                 CmaParserInputType::CmaParserInputTypeSupply
             }
@@ -614,10 +719,12 @@ fn handle_unidentified_method(input: JsonValue) -> Result<CmaParserInputData, Cm
             .map_err(|_| CmaParserError::MalformedInput)?,
     );
 
-    Ok(CmaParserInputData::Unidentified(CmaParserUnidentifiedInput {
-        abi_encoded_bytes: bytes,
-        msg_sender: sender,
-    }))
+    Ok(CmaParserInputData::Unidentified(
+        CmaParserUnidentifiedInput {
+            abi_encoded_bytes: bytes,
+            msg_sender: sender,
+        },
+    ))
 }
 
 fn handle_parse_ether_deposit(input: JsonValue) -> Result<CmaParserInputData, CmaParserError> {
@@ -625,7 +732,7 @@ fn handle_parse_ether_deposit(input: JsonValue) -> Result<CmaParserInputData, Cm
     require_len(&bytes, 52)?;
 
     let sender = Address::from_slice(&bytes[0..20]);
-    let value = U256::from_big_endian(&bytes[20..52]);
+    let value = U256::from_be_slice(&bytes[20..52]);
     let exec_layer_data = Bytes::from(bytes[52..].to_vec());
 
     Ok(CmaParserInputData::EtherDeposit(CmaParserEtherDeposit {
@@ -641,7 +748,7 @@ fn handle_parse_erc20_deposit(input: JsonValue) -> Result<CmaParserInputData, Cm
 
     let token = Address::from_slice(&bytes[0..20]);
     let sender = Address::from_slice(&bytes[20..40]);
-    let amount = U256::from_big_endian(&bytes[40..72]);
+    let amount = U256::from_be_slice(&bytes[40..72]);
     let exec_layer_data = Bytes::from(bytes[72..].to_vec());
 
     Ok(CmaParserInputData::Erc20Deposit(CmaParserErc20Deposit {
@@ -658,7 +765,7 @@ fn handle_parse_erc721_deposit(input: JsonValue) -> Result<CmaParserInputData, C
 
     let token = Address::from_slice(&bytes[0..20]);
     let sender = Address::from_slice(&bytes[20..40]);
-    let token_id = U256::from_big_endian(&bytes[40..72]);
+    let token_id = U256::from_be_slice(&bytes[40..72]);
     let (base_layer_data, exec_layer_data) = decode_abi_tail_two_bytes(&bytes[72..])?;
 
     Ok(CmaParserInputData::Erc721Deposit(CmaParserErc721Deposit {
@@ -670,7 +777,6 @@ fn handle_parse_erc721_deposit(input: JsonValue) -> Result<CmaParserInputData, C
     }))
 }
 
-
 fn handle_parse_erc1155_single_deposit(
     input: JsonValue,
 ) -> Result<CmaParserInputData, CmaParserError> {
@@ -679,8 +785,8 @@ fn handle_parse_erc1155_single_deposit(
 
     let token = Address::from_slice(&bytes[0..20]);
     let sender = Address::from_slice(&bytes[20..40]);
-    let token_id = U256::from_big_endian(&bytes[40..72]);
-    let amount = U256::from_big_endian(&bytes[72..104]);
+    let token_id = U256::from_be_slice(&bytes[40..72]);
+    let amount = U256::from_be_slice(&bytes[72..104]);
     let (base_layer_data, exec_layer_data) = decode_abi_tail_two_bytes(&bytes[104..])?;
 
     Ok(CmaParserInputData::Erc1155SingleDeposit(
@@ -742,11 +848,8 @@ fn handle_ether_withdrawal(input: JsonValue) -> Result<CmaParserInputData, CmaPa
     let encoded_args = decode_after_selector(&bytes)?;
     let receiver = withdrawal_receiver(&input)?;
 
-    let decoded = decode(
-        &[ParamType::Uint(256), ParamType::Bytes],
-        encoded_args,
-    )
-    .map_err(|_| CmaParserError::MalformedInput)?;
+    let decoded = decode(&[ParamType::Uint(256), ParamType::Bytes], encoded_args)
+        .map_err(|_| CmaParserError::MalformedInput)?;
 
     let amount = match &decoded[0] {
         Token::Uint(v) => *v,
@@ -757,11 +860,13 @@ fn handle_ether_withdrawal(input: JsonValue) -> Result<CmaParserInputData, CmaPa
         _ => return Err(CmaParserError::MalformedInput),
     };
 
-    Ok(CmaParserInputData::EtherWithdrawal(CmaParserEtherWithdrawal {
-        receiver,
-        amount,
-        exec_layer_data: exec_layer_hex(exec_layer_byte),
-    }))
+    Ok(CmaParserInputData::EtherWithdrawal(
+        CmaParserEtherWithdrawal {
+            receiver,
+            amount,
+            exec_layer_data: exec_layer_hex(exec_layer_byte),
+        },
+    ))
 }
 
 fn handle_erc20_withdrawal(input: JsonValue) -> Result<CmaParserInputData, CmaParserError> {
@@ -788,12 +893,14 @@ fn handle_erc20_withdrawal(input: JsonValue) -> Result<CmaParserInputData, CmaPa
         _ => return Err(CmaParserError::MalformedInput),
     };
 
-    Ok(CmaParserInputData::Erc20Withdrawal(CmaParserErc20Withdrawal {
-        receiver,
-        token,
-        amount,
-        exec_layer_data: exec_layer_hex(exec_layer_byte),
-    }))
+    Ok(CmaParserInputData::Erc20Withdrawal(
+        CmaParserErc20Withdrawal {
+            receiver,
+            token,
+            amount,
+            exec_layer_data: exec_layer_hex(exec_layer_byte),
+        },
+    ))
 }
 
 fn handle_erc721_withdrawal(input: JsonValue) -> Result<CmaParserInputData, CmaParserError> {
@@ -820,12 +927,14 @@ fn handle_erc721_withdrawal(input: JsonValue) -> Result<CmaParserInputData, CmaP
         _ => return Err(CmaParserError::MalformedInput),
     };
 
-    Ok(CmaParserInputData::Erc721Withdrawal(CmaParserErc721Withdrawal {
-        receiver,
-        token,
-        token_id,
-        exec_layer_data: exec_layer_hex(exec_layer_byte),
-    }))
+    Ok(CmaParserInputData::Erc721Withdrawal(
+        CmaParserErc721Withdrawal {
+            receiver,
+            token,
+            token_id,
+            exec_layer_data: exec_layer_hex(exec_layer_byte),
+        },
+    ))
 }
 
 fn handle_erc1155_single_withdrawal(
@@ -874,9 +983,7 @@ fn handle_erc1155_single_withdrawal(
     ))
 }
 
-fn handle_erc1155_batch_withdrawal(
-    input: JsonValue,
-) -> Result<CmaParserInputData, CmaParserError> {
+fn handle_erc1155_batch_withdrawal(input: JsonValue) -> Result<CmaParserInputData, CmaParserError> {
     let bytes = payload_bytes(&input)?;
     let encoded_args = decode_after_selector(&bytes)?;
     let receiver = withdrawal_receiver(&input)?;
@@ -1027,17 +1134,17 @@ fn handle_erc721_transfer(input: JsonValue) -> Result<CmaParserInputData, CmaPar
         _ => return Err(CmaParserError::MalformedInput),
     };
 
-    Ok(CmaParserInputData::Erc721Transfer(CmaParserErc721Transfer {
-        receiver,
-        token,
-        token_id,
-        exec_layer_data: exec_layer_hex(exec_layer_byte),
-    }))
+    Ok(CmaParserInputData::Erc721Transfer(
+        CmaParserErc721Transfer {
+            receiver,
+            token,
+            token_id,
+            exec_layer_data: exec_layer_hex(exec_layer_byte),
+        },
+    ))
 }
 
-fn handle_erc1155_single_transfer(
-    input: JsonValue,
-) -> Result<CmaParserInputData, CmaParserError> {
+fn handle_erc1155_single_transfer(input: JsonValue) -> Result<CmaParserInputData, CmaParserError> {
     let bytes = payload_bytes(&input)?;
     let encoded_args = decode_after_selector(&bytes)?;
 
@@ -1085,9 +1192,7 @@ fn handle_erc1155_single_transfer(
     ))
 }
 
-fn handle_erc1155_batch_transfer(
-    input: JsonValue,
-) -> Result<CmaParserInputData, CmaParserError> {
+fn handle_erc1155_batch_transfer(input: JsonValue) -> Result<CmaParserInputData, CmaParserError> {
     let bytes = payload_bytes(&input)?;
     let encoded_args = decode_after_selector(&bytes)?;
 
@@ -1163,7 +1268,7 @@ fn cma_decode_advance_inner(
                 input: data,
             });
         }
-        CmaParserInputType::CmaParserInputTypeErc1155SingleDeposit=> {
+        CmaParserInputType::CmaParserInputTypeErc1155SingleDeposit => {
             return handle_parse_erc1155_single_deposit(input).map(|data| CmaParserInput {
                 req_type,
                 input: data,
@@ -1210,12 +1315,8 @@ fn cma_decode_advance_inner(
                 CmaParserInputType::CmaParserInputTypeErc1155BatchWithdrawal => {
                     handle_erc1155_batch_withdrawal(input)
                 }
-                CmaParserInputType::CmaParserInputTypeEtherTransfer => {
-                    handle_ether_transfer(input)
-                }
-                CmaParserInputType::CmaParserInputTypeErc20Transfer => {
-                    handle_erc20_transfer(input)
-                }
+                CmaParserInputType::CmaParserInputTypeEtherTransfer => handle_ether_transfer(input),
+                CmaParserInputType::CmaParserInputTypeErc20Transfer => handle_erc20_transfer(input),
                 CmaParserInputType::CmaParserInputTypeErc721Transfer => {
                     handle_erc721_transfer(input)
                 }
@@ -1231,7 +1332,10 @@ fn cma_decode_advance_inner(
                 _ => Err(CmaParserError::IncompatibleInput),
             };
 
-            result.map(|data| CmaParserInput { req_type, input: data })
+            result.map(|data| CmaParserInput {
+                req_type,
+                input: data,
+            })
         }
         _ => Err(CmaParserError::Unknown),
     }
@@ -1262,8 +1366,8 @@ fn handle_ledger_get_balance(parsed_json: JsonValue) -> Result<CmaParserBalance,
     let account = parse_hex_account_id(&params[0])?;
     let mut balance = CmaParserBalance {
         account,
-        token: Address::zero(),
-        token_id: U256::zero(),
+        token: Address::ZERO,
+        token_id: U256::ZERO,
         exec_layer_data: String::new(),
     };
 
@@ -1292,8 +1396,8 @@ fn handle_ledger_get_supply(parsed_json: JsonValue) -> Result<CmaParserInputData
     }
 
     let mut supply = CmaParserSupply {
-        token: Address::zero(),
-        token_id: U256::zero(),
+        token: Address::ZERO,
+        token_id: U256::ZERO,
         exec_layer_data: String::new(),
     };
 
@@ -1322,10 +1426,8 @@ fn cma_decode_inspect_inner(input: JsonValue) -> Result<CmaParserInput, CmaParse
     let payload_hex = input["data"]["payload"]
         .as_str()
         .ok_or(CmaParserError::MalformedInput)?;
-    let payload_str = hex_to_string(payload_hex)
-        .map_err(|_| CmaParserError::MalformedInput)?;
-    let payload_json = json::parse(&payload_str)
-        .map_err(|_| CmaParserError::MalformedInput)?;
+    let payload_str = hex_to_string(payload_hex).map_err(|_| CmaParserError::MalformedInput)?;
+    let payload_json = json::parse(&payload_str).map_err(|_| CmaParserError::MalformedInput)?;
 
     let method = payload_json["method"]
         .as_str()
@@ -1336,12 +1438,11 @@ fn cma_decode_inspect_inner(input: JsonValue) -> Result<CmaParserInput, CmaParse
     }
 
     match req_type {
-        CmaParserInputType::CmaParserInputTypeBalance => {
-            handle_ledger_get_balance(payload_json).map(|data| CmaParserInput {
+        CmaParserInputType::CmaParserInputTypeBalance => handle_ledger_get_balance(payload_json)
+            .map(|data| CmaParserInput {
                 req_type,
                 input: CmaParserInputData::Balance(data),
-            })
-        }
+            }),
         CmaParserInputType::CmaParserInputTypeSupply => {
             handle_ledger_get_supply(payload_json).map(|data| CmaParserInput {
                 req_type,
@@ -1356,8 +1457,7 @@ fn handle_ether_voucher_encoding(
     voucher_request: &CmaVoucherFieldType,
 ) -> Result<CmaVoucher, CmaParserError> {
     if let CmaVoucherFieldType::EtherVoucherFields(fields) = voucher_request {
-        let mut value_bytes = [0u8; 32];
-        fields.amount.to_big_endian(&mut value_bytes);
+        let value_bytes = fields.amount.to_be_bytes::<32>();
 
         Ok(CmaVoucher {
             destination: to_checksum(&fields.receiver, None),
@@ -1450,11 +1550,8 @@ fn handle_erc1155_batch_voucher_encoding(
             return Err(CmaParserError::MalformedInput);
         }
 
-        let token_id_tokens: Vec<Token> = fields
-            .token_ids
-            .iter()
-            .map(|id| Token::Uint(*id))
-            .collect();
+        let token_id_tokens: Vec<Token> =
+            fields.token_ids.iter().map(|id| Token::Uint(*id)).collect();
         let amount_tokens: Vec<Token> = fields
             .amounts
             .iter()

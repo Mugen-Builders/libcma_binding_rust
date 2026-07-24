@@ -1,11 +1,15 @@
 [package]
 name = "libcma_binding_rust"
-version = "0.0.1"
+version = "0.1.0"
 edition = "2021"
-authors = ["Idogwu Chinonso idogwuchi@gmail.com"]
-description = "Rust utilities for Cartesi applicaitons, functions as a plugin wallet lib for managing applicaiton assets and also a parser for encoding and decoding vouchers and applicaion inputs."
+# Minimum Supported Rust Version. Conservative, plausible floor for edition 2021
+# plus the crate's dependencies; verified to build with the current toolchain.
+rust-version = "1.74"
+authors = ["Idogwu Chinonso <idogwuchi@gmail.com>"]
+description = "Rust utilities for Cartesi applications: a plugin wallet library for managing application assets, plus a parser for encoding and decoding vouchers and application inputs."
 license = "MIT"
 repository = "https://github.com/Mugen-Builders/libcma_binding_rust"
+documentation = "https://docs.rs/libcma_binding_rust"
 readme = "README.md"
 keywords = ["cartesi", "rollup", "ledger", "parser", "blockchain"]
 categories = ["api-bindings", "cryptography", "blockchain"]
@@ -17,15 +21,34 @@ path = "src/lib.rs"
 [dependencies]
 hex = "0.4"
 lazy_static = { version = "1.4", optional = true }
+# NOTE: `json` (0.12) is largely unmaintained. Tech debt: migrate to `serde_json`
+# (the de-facto standard). Tracked in CHANGELOG.md and surfaced by deny.toml.
 json = "0.12"
-ethers-core = "1.0.0"
+# Ethereum primitives + dynamic ABI. Migrated off the EOL `ethers-rs` onto `alloy`
+# (aligned with the `alloy-primitives`/`alloy-dyn-abi` 1.6.x the downstream sequencer resolves).
+alloy-primitives = "1.6"
+alloy-dyn-abi = "1.6"
 
 [build-dependencies]
 bindgen = "0.69"
 
+# docs.rs builds the crate OFFLINE (no network, no C++ toolchain), so it must use
+# the `mock` backend — a pure-Rust stub that needs neither. `host-real`/`riscv64`
+# would try to fetch/compile the real libcma and fail on the docs.rs sandbox.
+[package.metadata.docs.rs]
+features = ["mock"]
+default-target = "x86_64-unknown-linux-gnu"
+
 [features]
-default = ["native"]
-native = ["lazy_static"] # Mac testing with mocks
+# Exactly ONE backend must be enabled — they are mutually exclusive (enforced by the
+# compile_error! guard at the top of src/lib.rs). `mock` is the default so `cargo build`
+# and `cargo test` work out of the box, but it is a STUB ledger, NOT real libcma.
+#
+# IMPORTANT for consumers: selecting a REAL backend requires ALSO disabling defaults,
+# otherwise `mock` stays enabled and silently wins (a fake ledger in production):
+#     default-features = false, features = ["host-real"]   # (or "riscv64")
+default = ["mock"]
+mock = ["lazy_static"]   # In-memory MOCK ledger (thread-local stubs in src/mocks.rs) — plumbing/tests only, NOT real libcma
 riscv64 = []             # Cross-build the real C++ libcma for the Cartesi machine (riscv64)
 # Build the real C++ libcma for the HOST (x86_64) and link it instead of the mock.
 # Used off-chain (e.g. by a sequencer predicting the machine's ledger): the DEFS in
