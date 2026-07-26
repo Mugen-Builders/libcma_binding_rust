@@ -154,10 +154,19 @@ fn main() {
             // Download + stage the third-party deps, then compile the static archive. The Makefile
             // hardcodes `libcma_OBJDIR := build/riscv64`; override it so the host build lands in its
             // own dir (command-line assignments beat the Makefile's `:=`).
+            //
+            // Build ONLY the pieces libcma.a actually needs — Boost, the guest-tools libcmt
+            // headers, and nlohmann/json. The blanket `make third-party` also downloads and
+            // extracts the prebuilt cartesi-machine emulator .deb (~57 MB, xz-compressed), which is
+            // linked ONLY by the host-side `account-driver-reader` tool, NOT by libcma.a. Pulling it
+            // in needs `xz` (and downloads tens of MB) for nothing, and breaks minimal build
+            // environments such as the Cartesi machine cross-build image (which ships no `xz`).
             run(
                 "make",
                 &[
-                    "third-party",
+                    "third-party-boost",
+                    "third-party-guest-tools",
+                    "third-party-nlohmann-json",
                     &format!("TOOLCHAIN_PREFIX={toolchain_prefix}"),
                 ],
                 &mat,
