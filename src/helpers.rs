@@ -1,7 +1,7 @@
-use hex;
-use ethers_core::types::{Address};
-use json::{JsonValue, object};
 use crate::parser::CmaVoucher;
+use alloy_primitives::Address;
+use hex;
+use json::{object, JsonValue};
 
 pub fn hex_to_string(hex: &str) -> Result<String, Box<dyn std::error::Error>> {
     let hexstr = hex.strip_prefix("0x").unwrap_or(hex);

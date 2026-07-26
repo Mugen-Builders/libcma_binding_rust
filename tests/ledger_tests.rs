@@ -1,3 +1,33 @@
+//! Behavioural tests for the libcma `Ledger`.
+//!
+//! ## Asset types — fungible vs. non-fungible
+//!
+//! libcma has two token-backed asset types, and the distinction is load-bearing:
+//!
+//! * [`AssetType::TokenAddress`] — a **fungible** token (ERC-20), keyed by token address
+//!   only. Its total supply is a full 256-bit integer, so any balance is valid.
+//! * [`AssetType::TokenAddressId`] — a **non-fungible** token (ERC-721 / a single ERC-1155
+//!   id), keyed by *(token address, token id)*. Such an asset is unique: real libcma
+//!   enforces that its supply can only ever go `0 -> 1` and that the only legal deposit is
+//!   exactly `1` (`src/ledger_impl.cpp`). Depositing e.g. `1000` returns `SupplyOverflow` —
+//!   that error is the "you violated NFT uniqueness" signal, **not** an arithmetic overflow
+//!   (the supply field is 256-bit and nowhere near full).
+//!
+//! These fungible tests therefore use `TokenAddress`. The mock backend does not enforce the
+//! NFT rule, so an earlier version of these tests used `TokenAddressId` with fungible amounts
+//! and only passed against the mock; they failed against real libcma. See
+//! `test_nft_asset_deposit_is_capped_at_one` for the enforced NFT behaviour.
+//!
+//! ## Backend-agnostic assertions
+//!
+//! These run under BOTH the default `mock` backend and the real libcma backends
+//! (`host-real` / `riscv64`), which differ in incidental ways — most notably the mock uses
+//! 1-based asset/account ids (reserving id 1 for the Base asset) while real libcma is 0-based.
+//! So the tests assert *relationships* (a freshly created id is found again unchanged) rather
+//! than absolute id values, and probe "not found" via the `Find` retrieve operation (which
+//! errors on both) rather than `get_balance` (which returns 0 for an unknown pair on real
+//! libcma but errors on the mock).
+
 use libcma_binding_rust::{Ledger, LedgerError, *};
 use std::fs::OpenOptions;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -123,24 +153,71 @@ fn test_init_from_buffer_reinitializes_ledger() {
 }
 
 #[test]
+fn test_init_single_from_file_ether() {
+    let mut ledger = Ledger::new().expect("Failed to initialize ledger");
+
+    let path = unique_temp_file_path();
+    let config = LedgerSingleFileConfig::default();
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path)
+        .expect("Should create temp file");
+    file.set_len(config.memory_length as u64)
+        .expect("Should size temp file");
+
+    ledger
+        .init_single_from_file(&path, config, LedgerAsset::Ether)
+        .expect("Single-asset (ether) file-backed initialization should succeed");
+
+    drop(ledger);
+    std::fs::remove_file(path).expect("Should remove temp file");
+}
+
+#[test]
+fn test_init_single_from_buffer_erc20() {
+    let mut ledger = Ledger::new().expect("Failed to initialize ledger");
+
+    let mut buffer = vec![0u8; 1024 * 1024];
+    ledger
+        .init_single_from_buffer(&mut buffer, 256, LedgerAsset::Erc20(test_token_address()))
+        .expect("Single-asset (ERC-20) buffer-backed initialization should succeed");
+}
+
+#[test]
 fn test_create_asset_by_token_address() {
     let mut ledger = Ledger::new().expect("Failed to initialize ledger");
 
     let token_addr = test_token_address();
-    let token_id = U256::from_u64(1);
 
-    // Create an asset using token address
-    let asset_id = ledger.retrieve_asset(
-        None, // No existing asset_id
-        Some(token_addr),
-        Some(token_id),
-        AssetType::TokenAddressId,
-        RetrieveOperation::Create,
+    // Create a fungible (ERC-20) asset keyed by token address.
+    let created = ledger
+        .retrieve_asset(
+            None, // No existing asset_id
+            Some(token_addr),
+            None,
+            AssetType::TokenAddress,
+            RetrieveOperation::Create,
+        )
+        .expect("Asset creation should succeed");
+
+    // Backend-agnostic: the created asset must be findable again under the SAME id (the raw id
+    // value differs between the mock (1-based) and real libcma (0-based), so don't assert `> 0`).
+    let found = ledger
+        .retrieve_asset(
+            None,
+            Some(token_addr),
+            None,
+            AssetType::TokenAddress,
+            RetrieveOperation::Find,
+        )
+        .expect("Created asset should be findable");
+    assert_eq!(
+        created, found,
+        "Find must return the id that Create assigned"
     );
-
-    assert!(asset_id.is_ok(), "Asset creation should succeed");
-    let asset_id = asset_id.unwrap();
-    assert!(asset_id.0 > 0, "Asset ID should be non-zero");
 }
 
 #[test]
@@ -182,16 +259,29 @@ fn test_create_account_by_wallet_address() {
     let wallet_addr = test_account_address();
 
     // Create an account using wallet address
-    let account_id = ledger.retrieve_account(
-        None, // No existing account_id
-        AccountType::WalletAddress,
-        RetrieveOperation::Create,
-        Some(wallet_addr.as_bytes()),
-    );
+    let created = ledger
+        .retrieve_account(
+            None, // No existing account_id
+            AccountType::WalletAddress,
+            RetrieveOperation::Create,
+            Some(wallet_addr.as_slice()),
+        )
+        .expect("Account creation should succeed");
 
-    assert!(account_id.is_ok(), "Account creation should succeed");
-    let account_id = account_id.unwrap();
-    assert!(account_id.0 > 0, "Account ID should be non-zero");
+    // Backend-agnostic: the account must be findable again under the SAME id (real libcma is
+    // 0-based, the mock 1-based — so assert the relationship, not a specific value).
+    let found = ledger
+        .retrieve_account(
+            None,
+            AccountType::WalletAddress,
+            RetrieveOperation::Find,
+            Some(wallet_addr.as_slice()),
+        )
+        .expect("Created account should be findable");
+    assert_eq!(
+        created, found,
+        "Find must return the id that Create assigned"
+    );
 }
 
 #[test]
@@ -230,15 +320,14 @@ fn test_find_or_create_account() {
 fn test_deposit_and_balance() {
     let mut ledger = Ledger::new().expect("Failed to initialize ledger");
 
-    // Create an asset
+    // Create a fungible asset
     let token_addr = test_token_address();
-    let token_id = U256::from_u64(100);
     let asset_id = ledger
         .retrieve_asset(
             None,
             Some(token_addr),
-            Some(token_id),
-            AssetType::TokenAddressId,
+            None,
+            AssetType::TokenAddress,
             RetrieveOperation::Create,
         )
         .expect("Should create asset");
@@ -250,7 +339,7 @@ fn test_deposit_and_balance() {
             None,
             AccountType::WalletAddress,
             RetrieveOperation::Create,
-            Some(wallet_addr.as_bytes()),
+            Some(wallet_addr.as_slice()),
         )
         .expect("Should create account");
 
@@ -292,15 +381,14 @@ fn test_deposit_and_balance() {
 fn test_withdraw() {
     let mut ledger = Ledger::new().expect("Failed to initialize ledger");
 
-    // Create asset and account
+    // Create fungible asset and account
     let token_addr = test_token_address();
-    let token_id = U256::from_u64(200);
     let asset_id = ledger
         .retrieve_asset(
             None,
             Some(token_addr),
-            Some(token_id),
-            AssetType::TokenAddressId,
+            None,
+            AssetType::TokenAddress,
             RetrieveOperation::Create,
         )
         .expect("Should create asset");
@@ -311,7 +399,7 @@ fn test_withdraw() {
             None,
             AccountType::WalletAddress,
             RetrieveOperation::Create,
-            Some(wallet_addr.as_bytes()),
+            Some(wallet_addr.as_slice()),
         )
         .expect("Should create account");
 
@@ -341,36 +429,51 @@ fn test_withdraw() {
 fn test_insufficient_funds_error() {
     let mut ledger = Ledger::new().expect("Failed to initialize ledger");
 
-    // Create asset and account
+    // Fungible asset.
     let token_addr = test_token_address();
-    let token_id = U256::from_u64(300);
     let asset_id = ledger
         .retrieve_asset(
             None,
             Some(token_addr),
-            Some(token_id),
-            AssetType::TokenAddressId,
+            None,
+            AssetType::TokenAddress,
             RetrieveOperation::Create,
         )
         .expect("Should create asset");
 
+    // Fund a FIRST account so the asset's total supply is non-zero. libcma checks the asset
+    // supply for underflow BEFORE the per-account balance, so an empty account only reports
+    // InsufficientFunds (rather than a supply underflow) once the supply itself can cover it.
+    let mut funder_bytes = [0u8; 20];
+    funder_bytes[0] = 0xF0;
+    let funder = Address::new(funder_bytes);
+    let funder_id = ledger
+        .retrieve_account(
+            None,
+            AccountType::WalletAddress,
+            RetrieveOperation::Create,
+            Some(funder.as_slice()),
+        )
+        .expect("Should create funder account");
+    ledger
+        .deposit(asset_id, funder_id, U256::from_u64(1000))
+        .expect("funder deposit should succeed");
+
+    // A SECOND, empty account tries to withdraw more than its (zero) balance.
     let wallet_addr = test_account_address();
     let account_id = ledger
         .retrieve_account(
             None,
             AccountType::WalletAddress,
             RetrieveOperation::Create,
-            Some(wallet_addr.as_bytes()),
+            Some(wallet_addr.as_slice()),
         )
         .expect("Should create account");
 
-    // Try to withdraw without depositing first
-    let withdraw_amount = U256::from_u64(100);
-    let result = ledger.withdraw(asset_id, account_id, withdraw_amount);
-
+    let result = ledger.withdraw(asset_id, account_id, U256::from_u64(100));
     assert!(
         result.is_err(),
-        "Withdraw should fail with insufficient funds"
+        "Withdraw from an empty account should fail"
     );
     match result.unwrap_err() {
         LedgerError::InsufficientFunds => {
@@ -384,15 +487,14 @@ fn test_insufficient_funds_error() {
 fn test_transfer() {
     let mut ledger = Ledger::new().expect("Failed to initialize ledger");
 
-    // Create asset
+    // Create a fungible asset
     let token_addr = test_token_address();
-    let token_id = U256::from_u64(400);
     let asset_id = ledger
         .retrieve_asset(
             None,
             Some(token_addr),
-            Some(token_id),
-            AssetType::TokenAddressId,
+            None,
+            AssetType::TokenAddress,
             RetrieveOperation::Create,
         )
         .expect("Should create asset");
@@ -406,7 +508,7 @@ fn test_transfer() {
             None,
             AccountType::WalletAddress,
             RetrieveOperation::Create,
-            Some(wallet1.as_bytes()),
+            Some(wallet1.as_slice()),
         )
         .expect("Should create account 1");
 
@@ -418,7 +520,7 @@ fn test_transfer() {
             None,
             AccountType::WalletAddress,
             RetrieveOperation::Create,
-            Some(wallet2.as_bytes()),
+            Some(wallet2.as_slice()),
         )
         .expect("Should create account 2");
 
@@ -465,17 +567,16 @@ fn test_transfer() {
 fn test_multiple_assets_and_accounts() {
     let mut ledger = Ledger::new().expect("Failed to initialize ledger");
 
-    // Create two different assets
+    // Create two different fungible assets, keyed by two distinct token addresses.
     let mut token1_bytes = [0u8; 20];
     token1_bytes[0] = 0xA1;
     let token1_addr = TokenAddress::new(token1_bytes);
-    let token1_id = U256::from_u64(1);
     let asset1 = ledger
         .retrieve_asset(
             None,
             Some(token1_addr),
-            Some(token1_id),
-            AssetType::TokenAddressId,
+            None,
+            AssetType::TokenAddress,
             RetrieveOperation::Create,
         )
         .expect("Should create asset 1");
@@ -483,13 +584,12 @@ fn test_multiple_assets_and_accounts() {
     let mut token2_bytes = [0u8; 20];
     token2_bytes[0] = 0xB2;
     let token2_addr = TokenAddress::new(token2_bytes);
-    let token2_id = U256::from_u64(2);
     let asset2 = ledger
         .retrieve_asset(
             None,
             Some(token2_addr),
-            Some(token2_id),
-            AssetType::TokenAddressId,
+            None,
+            AssetType::TokenAddress,
             RetrieveOperation::Create,
         )
         .expect("Should create asset 2");
@@ -501,7 +601,7 @@ fn test_multiple_assets_and_accounts() {
             None,
             AccountType::WalletAddress,
             RetrieveOperation::Create,
-            Some(wallet_addr.as_bytes()),
+            Some(wallet_addr.as_slice()),
         )
         .expect("Should create account");
 
@@ -543,22 +643,23 @@ fn test_multiple_assets_and_accounts() {
 fn test_account_not_found_error() {
     let mut ledger = Ledger::new().expect("Failed to initialize ledger");
 
-    // Create asset
+    // Create a fungible asset.
     let token_addr = test_token_address();
-    let token_id = U256::from_u64(500);
     let asset_id = ledger
         .retrieve_asset(
             None,
             Some(token_addr),
-            Some(token_id),
-            AssetType::TokenAddressId,
+            None,
+            AssetType::TokenAddress,
             RetrieveOperation::Create,
         )
         .expect("Should create asset");
 
-    // Try to get balance for non-existent account
+    // An OPERATION against a non-existent account must fail with AccountNotFound. (`get_balance`
+    // is NOT used here: real libcma returns 0 for an unknown (asset, account) pair rather than
+    // erroring — it is the mutating paths that validate account existence.)
     let fake_account_id = LedgerAccountId(99999);
-    let result = ledger.get_balance(asset_id, fake_account_id);
+    let result = ledger.deposit(asset_id, fake_account_id, U256::from_u64(1));
 
     assert!(result.is_err(), "Should fail for non-existent account");
     match result.unwrap_err() {
@@ -580,13 +681,14 @@ fn test_asset_not_found_error() {
             None,
             AccountType::WalletAddress,
             RetrieveOperation::Create,
-            Some(wallet_addr.as_bytes()),
+            Some(wallet_addr.as_slice()),
         )
         .expect("Should create account");
 
-    // Try to get balance for non-existent asset
+    // An OPERATION against a non-existent asset must fail with AssetNotFound (again via a
+    // mutating path, not `get_balance`, which returns 0 for unknown pairs on real libcma).
     let fake_asset_id = LedgerAssetId(99999);
-    let result = ledger.get_balance(fake_asset_id, account_id);
+    let result = ledger.deposit(fake_asset_id, account_id, U256::from_u64(1));
 
     assert!(result.is_err(), "Should fail for non-existent asset");
     match result.unwrap_err() {
@@ -647,26 +749,90 @@ fn test_find_nonexistent_account() {
 
 #[test]
 fn test_retrieve_ether_asset() {
+    // The Base (ether) asset type is only supported by the buffer/file-backed multi-asset ledger
+    // (`cma_ledger_memory`). The transient `Ledger::new()` backend (`cma_ledger_basic`) has no
+    // Base case and returns EINVAL, so back the ledger with a buffer before touching ether.
     let mut ledger = Ledger::new().expect("Failed to initialize ledger");
-    let asset_id = ledger
+    let mut buffer = vec![0u8; 1024 * 1024];
+    ledger
+        .init_from_buffer(&mut buffer, LedgerBufferConfig::default())
+        .expect("Buffer-backed initialization should succeed");
+
+    let created = ledger
         .retrieve_ether_assets()
         .expect("Should create base ether asset");
-    assert!(asset_id.0 > 0, "Ether asset ID should be non-zero");
+    // Backend-agnostic: retrieving it again (find-or-create) must return the same id.
+    let again = ledger
+        .retrieve_ether_assets()
+        .expect("Should find the existing base ether asset");
+    assert_eq!(created, again, "Base ether asset id must be stable");
 }
 
+/// The NON-FUNGIBLE (`TokenAddressId`) asset type is capped at supply 1: a single deposit of
+/// exactly 1 succeeds, and anything else (a second unit, or an initial amount > 1) is rejected
+/// with `SupplyOverflow`. This is real libcma behaviour the mock does not model, so it only runs
+/// against a real backend.
+#[cfg(any(feature = "host-real", feature = "riscv64"))]
 #[test]
-fn test_large_amounts() {
+fn test_nft_asset_deposit_is_capped_at_one() {
     let mut ledger = Ledger::new().expect("Failed to initialize ledger");
 
-    // Create asset and account
     let token_addr = test_token_address();
-    let token_id = U256::from_u64(700);
+    let token_id = U256::from_u64(42);
     let asset_id = ledger
         .retrieve_asset(
             None,
             Some(token_addr),
             Some(token_id),
             AssetType::TokenAddressId,
+            RetrieveOperation::Create,
+        )
+        .expect("Should create NFT asset");
+
+    let holder = ledger
+        .retrieve_account(
+            None,
+            AccountType::WalletAddress,
+            RetrieveOperation::Create,
+            Some(test_account_address().as_slice()),
+        )
+        .expect("Should create holder account");
+
+    // Depositing more than one unit of a unique token is rejected.
+    match ledger.deposit(asset_id, holder, U256::from_u64(5)) {
+        Err(LedgerError::SupplyOverflow) => {}
+        other => panic!("NFT deposit > 1 should be SupplyOverflow, got {:?}", other),
+    }
+
+    // Minting the single unit succeeds...
+    ledger
+        .deposit(asset_id, holder, U256::from_u64(1))
+        .expect("Minting the single NFT unit should succeed");
+    assert_eq!(
+        ledger.get_total_supply(asset_id).expect("supply"),
+        U256::from_u64(1),
+        "NFT supply must be exactly 1"
+    );
+
+    // ...but a second unit pushes supply past 1 and is rejected.
+    match ledger.deposit(asset_id, holder, U256::from_u64(1)) {
+        Err(LedgerError::SupplyOverflow) => {}
+        other => panic!("second NFT unit should be SupplyOverflow, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_large_amounts() {
+    let mut ledger = Ledger::new().expect("Failed to initialize ledger");
+
+    // Create a fungible asset and account
+    let token_addr = test_token_address();
+    let asset_id = ledger
+        .retrieve_asset(
+            None,
+            Some(token_addr),
+            None,
+            AssetType::TokenAddress,
             RetrieveOperation::Create,
         )
         .expect("Should create asset");
@@ -677,7 +843,7 @@ fn test_large_amounts() {
             None,
             AccountType::WalletAddress,
             RetrieveOperation::Create,
-            Some(wallet_addr.as_bytes()),
+            Some(wallet_addr.as_slice()),
         )
         .expect("Should create account");
 

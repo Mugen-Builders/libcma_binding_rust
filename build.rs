@@ -1,5 +1,11 @@
 use std::{env, path::Path, path::PathBuf, process::Command};
 
+/// Pinned SHA-256 of the nlohmann/json v3.12.0 single-header release asset (`json.hpp`).
+/// Verified out-of-band against the upstream GitHub release download. A mismatch means the
+/// fetched header was corrupted or tampered with — the build must refuse to proceed.
+const NLOHMANN_JSON_SHA256: &str =
+    "aaf127c04cb31c406e5b04a63f1ae89369fccde6d8fa7cdda1ed4f32dfc5de63";
+
 fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
@@ -10,7 +16,11 @@ fn main() {
     // make the include-path lookups below fail. Pull the submodules in automatically so the crate
     // builds with nothing more than `cargo build` — no out-of-band setup step required.
     if !mat.join("include").exists() {
-        run("git", &["submodule", "update", "--init", "--recursive"], &manifest_dir);
+        run(
+            "git",
+            &["submodule", "update", "--init", "--recursive"],
+            &manifest_dir,
+        );
     }
 
     let cma_include_dir = mat.join("include").canonicalize().expect(
@@ -56,31 +66,76 @@ fn main() {
         .write_to_file(out_dir.join("bindings.rs"))
         .expect("Failed to write bindings");
 
-    // Link the real C++ libcma when not using the native mock.
-    if !cfg!(feature = "native") {
-        let lib_dir = mat.join("build/riscv64");
+    // MOCK backend active: shout about it so a fake in-memory ledger can never be shipped to
+    // production unnoticed. NOTE also that everything in the `!mock` block below (the wget of
+    // nlohmann/json, `make third-party` which fetches Boost et al., and the C++ compile of
+    // libcma.a) is gated OFF here — so a `mock` build downloads no third-party C++ sources and
+    // needs no C++ toolchain.
+    if cfg!(feature = "mock") {
+        println!(
+            "cargo:warning=libcma_binding_rust: building with the MOCK ledger (feature `mock`) — \
+             this is NOT real libcma; never use in production. For a real build use \
+             default-features = false, features = [\"host-real\"] (or \"riscv64\")."
+        );
+    }
+
+    // Link the real C++ libcma when the MOCK is NOT selected. Two targets:
+    //   - `riscv64`   → cross-compile for the Cartesi machine (the non-mock default).
+    //   - `host-real` → compile for the host (x86_64), so an off-chain consumer runs the
+    //                   *same* ledger the machine will. The DEFS in machine-asset-tools force
+    //                   SIMD-free/generic paths so the record bytes match across arches.
+    //
+    // Everything inside this block fetches third-party C++ sources from the NETWORK and invokes a
+    // C++ COMPILER; none of it runs for a `mock` build. Keeping the fetch/compile confined here is
+    // what keeps the default `mock` path hermetic (no network, no toolchain, docs.rs/offline-safe).
+    if !cfg!(feature = "mock") {
+        // Real builds are NOT hermetic: they require network access and a C++ toolchain (g++ >= 14
+        // for C++20/23). Make that requirement visible in the build log up front.
+        println!(
+            "cargo:warning=libcma_binding_rust: building REAL libcma from C++ source — this build \
+             requires network access and a C++ toolchain (g++ >= 14). See build.rs for details."
+        );
+
+        let host = cfg!(feature = "host-real");
+        // Distinct object dirs so a host build and a cross build never clobber each other.
+        let obj_subdir = if host { "build/host" } else { "build/riscv64" };
+        let lib_dir = mat.join(obj_subdir);
         let lib_path = lib_dir.join("libcma.a");
 
         // Build libcma.a from source if it isn't already present. This is what lets the crate be
         // consumed as a plain `git`/`crates.io` dependency WITHOUT vendoring a prebuilt archive.
         //
-        // Build-environment requirements (the Cartesi SDK / app Dockerfile provides these):
+        // Build-environment requirements (the Cartesi SDK / app Dockerfile provide the cross set):
         //   - GNU make, wget, and network access
-        //   - the RISC-V GCC 14 cross toolchain: g++-14-riscv64-linux-gnu / gcc-14-riscv64-linux-gnu
-        //     (libcma's C++ source requires GCC >= 14).
-        // Override the compiler names with CMA_RISCV64_CXX / CMA_RISCV64_CC if your toolchain
-        // differs, or skip this whole path by pre-building build/riscv64/libcma.a yourself.
+        //   - riscv64: the RISC-V GCC 14 cross toolchain (g++-14-riscv64-linux-gnu / gcc-14-…).
+        //   - host-real: a host C++ toolchain with g++ >= 14 (C++20/C++23) and Boost is fetched.
+        // Override the compiler names with CMA_RISCV64_CXX/CC or CMA_HOST_CXX/CC.
         if !lib_path.exists() {
-            let cxx =
-                env::var("CMA_RISCV64_CXX").unwrap_or_else(|_| "riscv64-linux-gnu-g++-14".into());
-            let cc =
-                env::var("CMA_RISCV64_CC").unwrap_or_else(|_| "riscv64-linux-gnu-gcc-14".into());
+            let (toolchain_prefix, cxx, cc, ar) = if host {
+                (
+                    String::new(),
+                    env::var("CMA_HOST_CXX").unwrap_or_else(|_| "g++".into()),
+                    env::var("CMA_HOST_CC").unwrap_or_else(|_| "gcc".into()),
+                    "ar".to_string(),
+                )
+            } else {
+                (
+                    "riscv64-linux-gnu-".to_string(),
+                    env::var("CMA_RISCV64_CXX")
+                        .unwrap_or_else(|_| "riscv64-linux-gnu-g++-14".into()),
+                    env::var("CMA_RISCV64_CC")
+                        .unwrap_or_else(|_| "riscv64-linux-gnu-gcc-14".into()),
+                    "riscv64-linux-gnu-ar".to_string(),
+                )
+            };
 
             // machine-asset-tools' `third-party` target fetches Boost/emulator/guest-tools but not
             // nlohmann/json, so fetch that single header first.
             let nlohmann = mat.join("third-party/nlohmann/json.hpp");
             if !nlohmann.exists() {
                 std::fs::create_dir_all(mat.join("third-party/nlohmann")).ok();
+                // GNU `wget` has no `--checksum` flag (only wget2 does), so we download here and
+                // verify the SHA-256 against a pinned constant below rather than at fetch time.
                 run(
                     "wget",
                     &[
@@ -91,17 +146,40 @@ fn main() {
                     &mat,
                 );
             }
+            // Supply-chain gate: pin + verify the one header the Makefile does not fetch itself.
+            // This runs on BOTH a fresh download and a pre-existing/vendored copy, so a tampered or
+            // corrupted cache is caught too. A mismatch is a hard, un-ignorable build failure.
+            verify_sha256(&nlohmann, NLOHMANN_JSON_SHA256);
 
-            // Download + stage the third-party deps, then cross-compile the static archive.
-            run("make", &["third-party", "TOOLCHAIN_PREFIX=riscv64-linux-gnu-"], &mat);
+            // Download + stage the third-party deps, then compile the static archive. The Makefile
+            // hardcodes `libcma_OBJDIR := build/riscv64`; override it so the host build lands in its
+            // own dir (command-line assignments beat the Makefile's `:=`).
+            //
+            // Build ONLY the pieces libcma.a actually needs — Boost, the guest-tools libcmt
+            // headers, and nlohmann/json. The blanket `make third-party` also downloads and
+            // extracts the prebuilt cartesi-machine emulator .deb (~57 MB, xz-compressed), which is
+            // linked ONLY by the host-side `account-driver-reader` tool, NOT by libcma.a. Pulling it
+            // in needs `xz` (and downloads tens of MB) for nothing, and breaks minimal build
+            // environments such as the Cartesi machine cross-build image (which ships no `xz`).
             run(
                 "make",
                 &[
-                    "build/riscv64/libcma.a",
-                    "TOOLCHAIN_PREFIX=riscv64-linux-gnu-",
+                    "third-party-boost",
+                    "third-party-guest-tools",
+                    "third-party-nlohmann-json",
+                    &format!("TOOLCHAIN_PREFIX={toolchain_prefix}"),
+                ],
+                &mat,
+            );
+            run(
+                "make",
+                &[
+                    &format!("{obj_subdir}/libcma.a"),
+                    &format!("libcma_OBJDIR={obj_subdir}"),
+                    &format!("TOOLCHAIN_PREFIX={toolchain_prefix}"),
                     &format!("CXX={cxx}"),
                     &format!("CC={cc}"),
-                    "AR=riscv64-linux-gnu-ar",
+                    &format!("AR={ar}"),
                 ],
                 &mat,
             );
@@ -132,7 +210,10 @@ fn main() {
 /// Used as a fallback so bindgen works even when libclang ships without its own resource headers.
 fn gcc_builtin_include() -> Option<String> {
     let cc = env::var("CC").unwrap_or_else(|_| "cc".into());
-    let out = Command::new(cc).arg("-print-file-name=include").output().ok()?;
+    let out = Command::new(cc)
+        .arg("-print-file-name=include")
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -142,6 +223,55 @@ fn gcc_builtin_include() -> Option<String> {
     } else {
         None
     }
+}
+
+/// Verify a file against a pinned SHA-256, failing the build loudly on mismatch. Used as the
+/// supply-chain gate for the nlohmann/json header fetched over the network. Shells out to a
+/// system hashing tool so no extra crate dependency is required.
+fn verify_sha256(path: &Path, expected: &str) {
+    let actual = sha256_of(path).unwrap_or_else(|| {
+        panic!(
+            "cannot verify {}: no usable SHA-256 tool found (need `sha256sum`, `shasum`, or \
+             `openssl` on PATH). Refusing to build against an unverified nlohmann/json header.",
+            path.display()
+        )
+    });
+    assert!(
+        actual.eq_ignore_ascii_case(expected),
+        "SHA-256 mismatch for {}: expected {expected}, got {actual}. Refusing to build against an \
+         unverified nlohmann/json header (possible supply-chain tampering or a corrupted download). \
+         Delete the file and re-fetch, or update the pin in build.rs if the upstream release changed.",
+        path.display()
+    );
+}
+
+/// Compute the lowercase hex SHA-256 of `path` using whatever system tool is available
+/// (`sha256sum`, then `shasum -a 256`, then `openssl dgst -sha256 -r`). Returns None if none
+/// produced a valid 64-char hex digest. Avoids pulling in a hashing crate as a build-dependency.
+fn sha256_of(path: &Path) -> Option<String> {
+    let p = path.to_str()?;
+    // (command, args preceding the file path); each tool prints the digest as the first token.
+    let candidates: [(&str, &[&str]); 3] = [
+        ("sha256sum", &[]),
+        ("shasum", &["-a", "256"]),
+        ("openssl", &["dgst", "-sha256", "-r"]),
+    ];
+    for (cmd, pre) in candidates {
+        let mut args: Vec<&str> = pre.to_vec();
+        args.push(p);
+        if let Ok(out) = Command::new(cmd).args(&args).output() {
+            if out.status.success() {
+                if let Ok(s) = String::from_utf8(out.stdout) {
+                    if let Some(tok) = s.split_whitespace().next() {
+                        if tok.len() == 64 && tok.bytes().all(|b| b.is_ascii_hexdigit()) {
+                            return Some(tok.to_ascii_lowercase());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Run a command in `cwd`, panicking with a helpful message if it is missing or fails.

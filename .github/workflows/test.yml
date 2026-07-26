@@ -6,7 +6,9 @@ on:
   pull_request:
 
 jobs:
-  native-tests:
+  # Default backend: pure-Rust MOCK ledger. Needs no C++ toolchain, no network, no
+  # submodule source beyond the headers — the fast, always-on gate.
+  mock-tests:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -18,8 +20,75 @@ jobs:
       - name: Install libclang for bindgen
         run: sudo apt-get update && sudo apt-get install -y clang libclang-dev
 
-      - name: Run mocked native tests
-        run: cargo test --features native
+      - name: Run mocked tests
+        run: cargo test --features mock
+
+  # Formatting, lints, and docs. All three steps run even if an earlier one fails
+  # (`if: ${{ !cancelled() }}`) so each reports independently.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install libclang for bindgen
+        run: sudo apt-get update && sudo apt-get install -y clang libclang-dev
+
+      # NOTE: this is a CHECK only — it never rewrites source. At the time this job was
+      # added the tree was NOT fully rustfmt-clean (pre-existing formatting in build.rs
+      # and src/*.rs owned by another workstream), so this step will stay RED until a
+      # one-time `cargo fmt --all` pass lands. That pass is a tracked follow-up.
+      - name: rustfmt (check only)
+        if: ${{ !cancelled() }}
+        run: cargo fmt --all --check
+
+      # WARNING-ONLY for now: there are pre-existing clippy lints in src/ that are owned
+      # by another workstream and must not be fixed here. Once they are cleared, tighten
+      # this to `-- -D warnings` so new lints fail CI.
+      # TODO(clippy-deny): append `-- -D warnings` after the src/ clippy cleanup lands.
+      - name: clippy (mock)
+        if: ${{ !cancelled() }}
+        run: cargo clippy --features mock --all-targets
+
+      - name: cargo doc (mock)
+        if: ${{ !cancelled() }}
+        run: cargo doc --no-deps --features mock
+
+  # REAL libcma compiled + linked for the host (x86_64). This is the backend that must
+  # produce byte-identical records to the riscv64 build, so it exercises the real C++
+  # ledger and the records-layout / reproducibility tests. Needs a g++ >= 14 toolchain,
+  # bindgen's libclang, and network access (Boost + nlohmann/json are fetched by build.rs).
+  host-real-tests:
+    runs-on: ubuntu-latest
+    env:
+      # build.rs's host path honours these (default g++/gcc, which on the runner is < 14).
+      CMA_HOST_CXX: g++-14
+      CMA_HOST_CC: gcc-14
+      # bindgen's builtin-header fallback shells out to $CC; keep it on the same major.
+      CC: gcc-14
+      CXX: g++-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install C++ toolchain + bindgen/build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            g++-14 gcc-14 build-essential \
+            clang libclang-dev \
+            wget make cmake
+
+      - name: Build + run host-real tests (real libcma linked for the host)
+        run: cargo test --no-default-features --features host-real -- --nocapture
 
   riscv-link-check:
     runs-on: ubuntu-latest
@@ -59,3 +128,43 @@ jobs:
           ar p "$lib" "$member" > "$obj"
           file "$obj" | grep -F 'RISC-V'
           rm -f "$obj"
+
+  # ===========================================================================
+  # TODO(cross-arch-differential): the ULTIMATE host<->machine reproducibility
+  # invariant — not yet implemented (heavy: needs a riscv64 build AND running it
+  # under QEMU user emulation, then a byte-for-byte image diff).
+  #
+  # tests/host_real_records_layout.rs already pins the 32-byte record layout and
+  # asserts host determinism, and riscv-link-check proves the riscv64 archive
+  # builds. The missing piece is proving the two backends emit the SAME records
+  # image for the SAME credits, byte for byte — the property that makes off-chain
+  # host prediction of the on-chain ledger sound.
+  #
+  # Intended shape of the job:
+  #   cross-arch-differential:
+  #     runs-on: ubuntu-latest
+  #     steps:
+  #       - uses: actions/checkout@v4
+  #         with: { submodules: recursive }
+  #       - uses: dtolnay/rust-toolchain@stable
+  #       - uses: docker/setup-qemu-action@v3   # register binfmt for riscv64 user emu
+  #       - name: Install host + riscv64 GCC 14 toolchains, libclang, qemu-user
+  #         run: |
+  #           sudo apt-get update
+  #           sudo apt-get install -y \
+  #             g++-14 gcc-14 g++-14-riscv64-linux-gnu gcc-14-riscv64-linux-gnu \
+  #             build-essential clang libclang-dev wget make cmake \
+  #             qemu-user qemu-user-static libc6-riscv64-cross libstdc++6-riscv64-cross
+  #       # 1. Build a tiny harness that credits a FIXED (address, balance) set into a
+  #       #    buffer-backed single-asset ledger and writes the 128 KiB records prefix
+  #       #    to a file. Build it twice from the same source:
+  #       #      a) host-real  -> native x86_64 binary   -> host.records
+  #       #      b) riscv64    -> riscv64 binary, run via `qemu-riscv64` -> riscv.records
+  #       #    (The riscv64 crate currently builds a static archive; a small #[no_mangle]
+  #       #     entrypoint or an integration test cross-compiled to riscv64-unknown-linux-gnu
+  #       #     and executed under qemu is the mechanism to add.)
+  #       # 2. Assert byte-for-byte equality:
+  #       #       cmp host.records riscv.records
+  #       #    A mismatch means the host can NOT soundly predict the machine ledger and
+  #       #    must fail CI hard.
+  # ===========================================================================

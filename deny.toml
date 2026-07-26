@@ -1,0 +1,65 @@
+# cargo-deny configuration — https://embarkstudios.github.io/cargo-deny/
+#
+# Run:  cargo deny check
+#
+# Purpose here is twofold:
+#   1. Enforce a permissive-only license allow-list across the dependency tree.
+#   2. Surface this crate's known tech debt — the deprecated `json` and
+#      `ethers-core` dependencies — via security-advisory and ban checks, as a
+#      standing reminder to migrate to `serde_json` and `alloy` respectively.
+
+[graph]
+all-features = false
+
+# ---------------------------------------------------------------------------
+# Security advisories (RustSec DB).
+# ---------------------------------------------------------------------------
+[advisories]
+version = 2
+# Vulnerabilities are always denied under schema v2.
+# Check every crate (direct + transitive) for `unmaintained` advisories so
+# `json` (RUSTSEC-2022-0081) and any ethers-rs advisory are flagged.
+unmaintained = "all"
+yanked = "warn"
+ignore = []
+
+# ---------------------------------------------------------------------------
+# License policy — permissive licenses only.
+# ---------------------------------------------------------------------------
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "CC0-1.0",
+    "Unlicense",
+    "MPL-2.0",
+]
+confidence-threshold = 0.8
+
+# ---------------------------------------------------------------------------
+# Bans — explicitly flag the deprecated direct dependencies.
+# ---------------------------------------------------------------------------
+[bans]
+multiple-versions = "warn"
+wildcards = "warn"
+# These are intentionally listed so `cargo deny check bans` surfaces them as a
+# migration reminder. Remove each entry once the corresponding replacement lands.
+deny = [
+    { name = "json", reason = "Unmaintained (RUSTSEC-2022-0081); migrate to serde_json." },
+    # ethers-core removed — the crate migrated to alloy (alloy-primitives / alloy-dyn-abi).
+]
+
+# ---------------------------------------------------------------------------
+# Source registries.
+# ---------------------------------------------------------------------------
+[sources]
+unknown-registry = "warn"
+unknown-git = "warn"

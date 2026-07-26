@@ -1,6 +1,6 @@
 //! Canonical parser vectors ported from `third_party/machine-asset-tools/tests/parser.c`.
 
-use ethers_core::types::{Address, U256};
+use alloy_primitives::{Address, U256};
 use json::JsonValue;
 use libcma_binding_rust::parser::{
     cma_decode_advance, cma_decode_inspect, cma_encode_voucher, CmaParserErc721VoucherFields,
@@ -99,7 +99,8 @@ fn vector_ether_transfer_from_parser_c() {
 
 #[test]
 fn vector_ledger_get_balance_from_parser_c() {
-    let payload = r#"{"method":"ledger_getBalance","params":["0x0000000000000000000000000000000000000001"]}"#;
+    let payload =
+        r#"{"method":"ledger_getBalance","params":["0x0000000000000000000000000000000000000001"]}"#;
     let result =
         cma_decode_inspect(inspect_input(payload)).expect("ledger_getBalance should decode");
 
@@ -115,9 +116,8 @@ fn vector_erc721_voucher_from_parser_c() {
     let app_address = Address::from_slice(&[
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xbe, 0xef,
     ]);
-    let receiver = Address::from_slice(&[
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2,
-    ]);
+    let receiver =
+        Address::from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
     let token = Address::from_slice(&[
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff,
     ]);
@@ -145,20 +145,18 @@ fn vector_ether_voucher_value_from_parser_c() {
     let receiver: Address = "0x3e157927fb178490941bb18adcdc4144e442e32a"
         .parse()
         .unwrap();
-    let amount = U256::from_dec_str("1500000000000000000").unwrap();
-    let request = CmaVoucherFieldType::EtherVoucherFields(CmaParserEtherVoucherFields {
-        receiver,
-        amount,
-    });
+    let amount = U256::from_str_radix("1500000000000000000", 10).unwrap();
+    let request =
+        CmaVoucherFieldType::EtherVoucherFields(CmaParserEtherVoucherFields { receiver, amount });
 
-    let voucher = cma_encode_voucher(CmaParserVoucherType::CmaParserVoucherTypeEther, None, request)
-        .expect("ether voucher should encode");
+    let voucher = cma_encode_voucher(
+        CmaParserVoucherType::CmaParserVoucherTypeEther,
+        None,
+        request,
+    )
+    .expect("ether voucher should encode");
 
-    let mut expected_value = [0u8; 32];
-    amount.to_big_endian(&mut expected_value);
-    assert_eq!(
-        voucher.value,
-        format!("0x{}", hex::encode(expected_value))
-    );
+    let expected_value = amount.to_be_bytes::<32>();
+    assert_eq!(voucher.value, format!("0x{}", hex::encode(expected_value)));
     assert_eq!(voucher.payload, "0x");
 }

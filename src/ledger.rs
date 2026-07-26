@@ -1,3 +1,29 @@
+//! Safe Rust wrapper around the C++ `libcma` ledger.
+//!
+//! # Backends
+//!
+//! Exactly one backend feature is compiled in (they are mutually exclusive; see
+//! the `compile_error!` guards in `lib.rs`):
+//!
+//! - **`mock`** (default) — an in-memory **stub** ledger (`src/mocks.rs`). Needs
+//!   no C++ toolchain or network; for compile/plumbing tests only. It is **not**
+//!   real libcma and must never be used in production.
+//! - **`host-real`** — the real C++ libcma built for the host (x86_64), used
+//!   off-chain (e.g. a sequencer predicting the Cartesi machine's ledger).
+//! - **`riscv64`** — the real C++ libcma cross-compiled to run inside the
+//!   Cartesi machine.
+//!
+//! # Reproducibility invariant
+//!
+//! `host-real` and `riscv64` build libcma with SIMD-free / generic flags
+//! (`-DBOOST_UNORDERED_DISABLE_SSE2`, `-DBOOST_UNORDERED_DISABLE_NEON`,
+//! `-DBOOST_INTERPROCESS_FORCE_GENERIC_EMULATION`) so the on-disk 32-byte account
+//! records (single-asset drive format v2: `balance` uint96 little-endian [low u64 |
+//! high u32] | `owner` 20 bytes, no padding) are
+//! byte-identical across x86_64 and riscv64. This is what makes off-chain
+//! prediction with `host-real` sound: the host reproduces, byte for byte,
+//! exactly what the machine computes on-chain.
+
 use crate::bindings;
 use crate::error::LedgerError;
 use crate::types::*;
@@ -5,28 +31,12 @@ use std::ffi::CString;
 use std::path::Path;
 use std::ptr;
 
-/// Storage mode for file-backed ledgers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LedgerMemoryMode {
-    OpenOnly,
-    CreateOnly,
-}
-
-impl LedgerMemoryMode {
-    fn to_c(self) -> bindings::cma_ledger_memory_mode_t {
-        match self {
-            LedgerMemoryMode::OpenOnly => bindings::cma_ledger_memory_mode_t_CMA_LEDGER_OPEN_ONLY,
-            LedgerMemoryMode::CreateOnly => {
-                bindings::cma_ledger_memory_mode_t_CMA_LEDGER_CREATE_ONLY
-            }
-        }
-    }
-}
-
 /// Configuration for file-backed ledger initialization.
+///
+/// The backing file is now always opened in create-or-open mode: it is created
+/// when missing and validated (size/version) when it already exists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LedgerFileConfig {
-    pub mode: LedgerMemoryMode,
     pub offset: usize,
     pub memory_length: usize,
     pub max_accounts: usize,
@@ -37,12 +47,68 @@ pub struct LedgerFileConfig {
 impl Default for LedgerFileConfig {
     fn default() -> Self {
         Self {
-            mode: LedgerMemoryMode::CreateOnly,
             offset: 0,
             memory_length: 1024 * 1024,
             max_accounts: 256,
             max_assets: 256,
             max_balances: 1024,
+        }
+    }
+}
+
+/// The single, immutable asset that a single-asset ledger tracks.
+///
+/// Chosen once when the ledger is created and fixed for the lifetime of the
+/// backing store. Reopening the same file with a different asset is rejected by
+/// the underlying library.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LedgerAsset {
+    /// The base asset (ether). No token address.
+    Ether,
+    /// A single ERC-20 token, identified by its contract address.
+    Erc20(TokenAddress),
+}
+
+impl LedgerAsset {
+    /// Lower to the C `(asset_type, token_address)` pair. The address is returned
+    /// by value so the caller can keep it alive while passing a pointer to it.
+    fn to_c(
+        self,
+    ) -> (
+        bindings::cma_ledger_asset_type_t,
+        Option<bindings::cma_token_address_t>,
+    ) {
+        match self {
+            LedgerAsset::Ether => (
+                bindings::cma_ledger_asset_type_t_CMA_LEDGER_ASSET_TYPE_BASE,
+                None,
+            ),
+            LedgerAsset::Erc20(addr) => (
+                bindings::cma_ledger_asset_type_t_CMA_LEDGER_ASSET_TYPE_TOKEN_ADDRESS,
+                Some(addr.to_c()),
+            ),
+        }
+    }
+}
+
+/// Configuration for file-backed single-asset ledger initialization.
+///
+/// Unlike [`LedgerFileConfig`], a single-asset ledger has no `max_assets`
+/// (there is exactly one) or `max_balances`; `max_accounts` is the capacity of
+/// the withdrawable-balance drive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LedgerSingleFileConfig {
+    pub offset: usize,
+    pub memory_length: usize,
+    pub max_accounts: usize,
+}
+
+impl Default for LedgerSingleFileConfig {
+    fn default() -> Self {
+        Self {
+            offset: 0,
+            memory_length: 1024 * 1024,
+            max_accounts: 256,
         }
     }
 }
@@ -65,15 +131,31 @@ impl Default for LedgerBufferConfig {
     }
 }
 
-/// Safe wrapper around the C ledger
+/// Safe wrapper around the C++ `libcma` ledger.
+///
+/// # Thread safety
+///
+/// `Ledger` wraps a self-referential C++ object (Boost.Interprocess): the
+/// backend caches an internal reference bound to its own storage, so the object
+/// is heap-pinned via [`Box`] to keep its address stable across moves. As a
+/// consequence `Ledger` is **`!Send`** and **`!Sync`** — it must not be moved or
+/// shared across threads without external synchronization. Downstream code that
+/// needs `Send` typically wraps the `Ledger` in a mutex together with its own
+/// `unsafe impl Send`.
 pub struct Ledger {
-    inner: bindings::cma_ledger_t,
+    // Boxed so the C++ ledger object has a STABLE heap address. The backends
+    // (`cma_ledger_memory`, `cma_ledger_single`) are self-referential — they cache
+    // a `managed_memory &m_memory` bound to their own `m_state` member — so the
+    // `cma_ledger_t` storage must never be relocated after init. Holding it inline
+    // would let a move of `Ledger` (e.g. returning it by value) memcpy the bytes and
+    // dangle that reference; the box keeps the storage put and moves only the pointer.
+    inner: Box<bindings::cma_ledger_t>,
 }
 
 impl Ledger {
     fn restore_empty_ledger(&mut self) {
         unsafe {
-            let _ = bindings::cma_ledger_init(&mut self.inner);
+            let _ = bindings::cma_ledger_init(&mut *self.inner);
         }
     }
 
@@ -82,12 +164,12 @@ impl Ledger {
         init_fn: impl FnOnce(*mut bindings::cma_ledger_t) -> i32,
     ) -> Result<(), LedgerError> {
         unsafe {
-            let fini_result = bindings::cma_ledger_fini(&mut self.inner);
+            let fini_result = bindings::cma_ledger_fini(&mut *self.inner);
             if fini_result < 0 {
                 return Err(LedgerError::from_code(fini_result));
             }
 
-            let init_result = init_fn(&mut self.inner);
+            let init_result = init_fn(&mut *self.inner);
             if init_result < 0 {
                 self.restore_empty_ledger();
                 return Err(LedgerError::from_code(init_result));
@@ -100,19 +182,21 @@ impl Ledger {
     /// Initialize a new ledger
     pub fn new() -> Result<Self, LedgerError> {
         unsafe {
-            let mut ledger = std::mem::zeroed::<bindings::cma_ledger_t>();
-            let result = bindings::cma_ledger_init(&mut ledger);
+            // Allocate the storage on the heap FIRST, then construct the C++ object
+            // in place, so its address is fixed for the lifetime of the `Ledger`.
+            let mut inner = Box::new(std::mem::zeroed::<bindings::cma_ledger_t>());
+            let result = bindings::cma_ledger_init(&mut *inner);
             if result < 0 {
                 return Err(LedgerError::from_code(result));
             }
-            Ok(Ledger { inner: ledger })
+            Ok(Ledger { inner })
         }
     }
 
     /// Reset the ledger
     pub fn reset(&mut self) -> Result<(), LedgerError> {
         unsafe {
-            let result = bindings::cma_ledger_reset(&mut self.inner);
+            let result = bindings::cma_ledger_reset(&mut *self.inner);
             if result < 0 {
                 return Err(LedgerError::from_code(result));
             }
@@ -140,7 +224,7 @@ impl Ledger {
                 .unwrap_or_else(|| bindings::cmt_abi_u256_t { data: [0u8; 32] });
 
             let result = bindings::cma_ledger_retrieve_asset(
-                &mut self.inner,
+                &mut *self.inner,
                 &mut out_asset_id,
                 if token_address.is_some() {
                     &mut out_token_address
@@ -231,7 +315,7 @@ impl Ledger {
             };
 
             let result = bindings::cma_ledger_retrieve_account(
-                &mut self.inner,
+                &mut *self.inner,
                 &mut out_account_id,
                 &mut c_account,
                 addr_ptr,
@@ -275,7 +359,7 @@ impl Ledger {
         unsafe {
             let c_amount = amount.to_c();
             let result = bindings::cma_ledger_deposit(
-                &mut self.inner,
+                &mut *self.inner,
                 asset_id.0,
                 to_account_id.0,
                 &c_amount,
@@ -299,7 +383,7 @@ impl Ledger {
         unsafe {
             let c_amount = amount.to_c();
             let result = bindings::cma_ledger_withdraw(
-                &mut self.inner,
+                &mut *self.inner,
                 asset_id.0,
                 from_account_id.0,
                 &c_amount,
@@ -324,7 +408,7 @@ impl Ledger {
         unsafe {
             let c_amount = amount.to_c();
             let result = bindings::cma_ledger_transfer(
-                &mut self.inner,
+                &mut *self.inner,
                 asset_id.0,
                 from_account_id.0,
                 to_account_id.0,
@@ -348,7 +432,7 @@ impl Ledger {
         unsafe {
             let mut out_balance = std::mem::zeroed::<bindings::cmt_abi_u256_t>();
             let result = bindings::cma_ledger_get_balance(
-                &self.inner as *const _ as *mut _,
+                &*self.inner as *const _ as *mut _,
                 asset_id.0,
                 account_id.0,
                 &mut out_balance,
@@ -363,14 +447,14 @@ impl Ledger {
         }
     }
 
-    /// Get total supply for an asset (via [`cma_ledger_retrieve_asset`] with find).
+    /// Get total supply for an asset (via `cma_ledger_retrieve_asset` with find).
     pub fn get_total_supply(&self, asset_id: LedgerAssetId) -> Result<U256, LedgerError> {
         unsafe {
             let mut asset_id_mut = asset_id.0;
             let mut asset_type = bindings::cma_ledger_asset_type_t_CMA_LEDGER_ASSET_TYPE_ID;
             let mut out_supply = std::mem::zeroed::<bindings::cma_amount_t>();
             let result = bindings::cma_ledger_retrieve_asset(
-                &self.inner as *const _ as *mut _,
+                &*self.inner as *const _ as *mut _,
                 &mut asset_id_mut,
                 ptr::null_mut(),
                 ptr::null_mut(),
@@ -411,7 +495,6 @@ impl Ledger {
             bindings::cma_ledger_init_file(
                 ledger,
                 file_path.as_ptr(),
-                config.mode.to_c(),
                 config.offset,
                 config.memory_length,
                 config.max_accounts,
@@ -438,12 +521,67 @@ impl Ledger {
             )
         })
     }
+
+    /// Reinitialize this ledger as a single-asset ledger backed by a file
+    /// (create-or-open). The asset (ether or one ERC-20) is fixed for the life
+    /// of the backing file; balances are 64-bit.
+    pub fn init_single_from_file<P: AsRef<Path>>(
+        &mut self,
+        file_path: P,
+        config: LedgerSingleFileConfig,
+        asset: LedgerAsset,
+    ) -> Result<(), LedgerError> {
+        let file_path = CString::new(file_path.as_ref().to_string_lossy().as_bytes())
+            .map_err(|_| LedgerError::Other(-22))?;
+        let (asset_type, token_address) = asset.to_c();
+
+        self.reinitialize(|ledger| unsafe {
+            bindings::cma_ledger_init_single_file(
+                ledger,
+                file_path.as_ptr(),
+                config.offset,
+                config.memory_length,
+                config.max_accounts,
+                asset_type,
+                token_address
+                    .as_ref()
+                    .map(|addr| addr as *const _)
+                    .unwrap_or(ptr::null()),
+            )
+        })
+    }
+
+    /// Reinitialize this ledger as a single-asset ledger over caller-provided
+    /// memory (non-persistent). `max_accounts` is the capacity of the
+    /// withdrawable-balance drive.
+    pub fn init_single_from_buffer(
+        &mut self,
+        buffer: &mut [u8],
+        max_accounts: usize,
+        asset: LedgerAsset,
+    ) -> Result<(), LedgerError> {
+        let (asset_type, token_address) = asset.to_c();
+
+        self.reinitialize(|ledger| unsafe {
+            bindings::cma_ledger_init_single_buffer(
+                ledger,
+                buffer.as_mut_ptr() as *mut _,
+                buffer.len(),
+                max_accounts,
+                asset_type,
+                token_address
+                    .as_ref()
+                    .map(|addr| addr as *const _)
+                    .unwrap_or(ptr::null()),
+            )
+        })
+    }
 }
 
 impl Drop for Ledger {
     fn drop(&mut self) {
         unsafe {
-            bindings::cma_ledger_fini(&mut self.inner);
+            bindings::cma_ledger_fini(&mut *self.inner);
         }
     }
 }
