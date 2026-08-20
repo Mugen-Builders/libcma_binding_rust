@@ -101,6 +101,25 @@ fn main() {
         let obj_subdir = if host { "build/host" } else { "build/riscv64" };
         let lib_dir = mat.join(obj_subdir);
         let lib_path = lib_dir.join("libcma.a");
+        // libcma.a archives ONLY libcma's own objects (ledger*, parser*, utils). `parser_impl.o`
+        // references libcmt's C ABI helpers (cmt_abi_*, cmt_buf_*) and those symbols are NOT in
+        // the archive, so libcmt must be linked alongside it. Where libcmt comes from is
+        // arch-dependent — see `cmt_lib_path` below.
+        //
+        // This is easy to miss because archive members are pulled lazily: nothing in this crate's
+        // own code path calls the C parser (parser.rs is pure Rust over alloy), so `parser_impl.o`
+        // is never pulled and the missing symbols stay invisible until a DOWNSTREAM consumer calls
+        // cma_parser_decode_advance/inspect or cma_parser_encode_voucher — at which point the link
+        // fails with a dozen `undefined symbol: cmt_abi_*`. tests/c_parser_link.rs forces exactly
+        // that pull so the regression cannot come back unnoticed.
+        //
+        // riscv64: upstream deliberately does NOT build libcmt from source (its real io backend
+        // needs the cartesi Linux kernel headers, which exist only inside the guest). It comes
+        // from the machine-guest-tools package installed in the app image, so we emit a plain
+        // `-lcmt` and let the image supply it.
+        // host: the Makefile builds it from the vendored guest-tools sources with the mock io
+        // backend, so we build and statically link that archive.
+        let cmt_lib_path = lib_dir.join("libcmt.a");
 
         // Build libcma.a from source if it isn't already present. This is what lets the crate be
         // consumed as a plain `git`/`crates.io` dependency WITHOUT vendoring a prebuilt archive.
@@ -110,7 +129,7 @@ fn main() {
         //   - riscv64: the RISC-V GCC 14 cross toolchain (g++-14-riscv64-linux-gnu / gcc-14-…).
         //   - host-real: a host C++ toolchain with g++ >= 14 (C++20/C++23) and Boost is fetched.
         // Override the compiler names with CMA_RISCV64_CXX/CC or CMA_HOST_CXX/CC.
-        if !lib_path.exists() {
+        if !lib_path.exists() || (host && !cmt_lib_path.exists()) {
             let (toolchain_prefix, cxx, cc, ar) = if host {
                 (
                     String::new(),
@@ -151,6 +170,19 @@ fn main() {
             // corrupted cache is caught too. A mismatch is a hard, un-ignorable build failure.
             verify_sha256(&nlohmann, NLOHMANN_JSON_SHA256);
 
+            // Self-heal a partially-staged libcmt. Upstream's `third-party/libcmt` make target is a
+            // DIRECTORY, and a directory's mtime is trivially newer than the tarball it was
+            // extracted from, so make considers any existing copy up to date and never repairs it.
+            // A checkout that was staged by an older revision therefore keeps a headers-only
+            // directory forever, and the libcmt compile dies on
+            // `third-party/libcmt/src/buf.c: No such file or directory`. Removing it forces a clean
+            // re-extraction of both the headers and the sources.
+            let staged_cmt = mat.join("third-party/libcmt");
+            if staged_cmt.exists() && !staged_cmt.join("src/buf.c").exists() {
+                std::fs::remove_dir_all(&staged_cmt)
+                    .expect("failed to clear the partially-staged third-party/libcmt directory");
+            }
+
             // Download + stage the third-party deps, then compile the static archive. The Makefile
             // hardcodes `libcma_OBJDIR := build/riscv64`; override it so the host build lands in its
             // own dir (command-line assignments beat the Makefile's `:=`).
@@ -171,22 +203,35 @@ fn main() {
                 ],
                 &mat,
             );
+            // On the host, build libcmt.a in the same invocation. On riscv64 the Makefile leaves
+            // `libcmt_LIB` empty on purpose (see the comment on `cmt_lib_path`), so asking for the
+            // target there would fail with "no rule to make target".
+            let mut targets = vec![format!("{obj_subdir}/libcma.a")];
+            if host {
+                targets.push(format!("{obj_subdir}/libcmt.a"));
+            }
+            let mut make_args: Vec<String> = targets;
+            make_args.extend([
+                format!("libcma_OBJDIR={obj_subdir}"),
+                format!("TOOLCHAIN_PREFIX={toolchain_prefix}"),
+                format!("CXX={cxx}"),
+                format!("CC={cc}"),
+                format!("AR={ar}"),
+            ]);
             run(
                 "make",
-                &[
-                    &format!("{obj_subdir}/libcma.a"),
-                    &format!("libcma_OBJDIR={obj_subdir}"),
-                    &format!("TOOLCHAIN_PREFIX={toolchain_prefix}"),
-                    &format!("CXX={cxx}"),
-                    &format!("CC={cc}"),
-                    &format!("AR={ar}"),
-                ],
+                &make_args.iter().map(String::as_str).collect::<Vec<_>>(),
                 &mat,
             );
             assert!(
                 lib_path.exists(),
                 "libcma.a build did not produce {}",
                 lib_path.display()
+            );
+            assert!(
+                !host || cmt_lib_path.exists(),
+                "libcmt.a build did not produce {}",
+                cmt_lib_path.display()
             );
         }
 
@@ -195,6 +240,15 @@ fn main() {
             lib_dir.canonicalize().unwrap().display()
         );
         println!("cargo:rustc-link-lib=static=cma");
+        // MUST come after `cma`: static archives are resolved left-to-right, and it is libcma's
+        // parser_impl.o that references the cmt_abi_*/cmt_buf_* symbols, not the other way round.
+        if host {
+            println!("cargo:rustc-link-lib=static=cmt");
+        } else {
+            // Plain `-lcmt`, matching what upstream's own sample apps pass: resolves against the
+            // libcmt shipped by the machine-guest-tools package in the Cartesi app image.
+            println!("cargo:rustc-link-lib=cmt");
+        }
         // libcma is C++ (Boost.Interprocess/Unordered); link the C++ runtime after it so its
         // vtables / __cxxabiv1 ABI symbols resolve. Dynamic so the cross gcc locates libstdc++.so
         // automatically (the machine rootfs must provide libstdc++6).

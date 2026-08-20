@@ -129,6 +129,45 @@ jobs:
           file "$obj" | grep -F 'RISC-V'
           rm -f "$obj"
 
+      # Inspecting the archive is not enough: libcma.a's parser_impl.o references libcmt's
+      # cmt_abi_*/cmt_buf_* symbols, which live OUTSIDE the archive. Archive members are pulled
+      # lazily, so a missing libcmt only shows up when something actually calls the C parser.
+      # This links a real riscv64 binary that does, against the same `-lcma -lcmt` that build.rs
+      # emits for the riscv64 backend, inside the builder image where the machine-guest-tools
+      # package supplies libcmt. tests/c_parser_link.rs is the host-side counterpart.
+      - name: Link a real riscv64 binary against libcma + libcmt
+        working-directory: third_party/machine-asset-tools
+        run: |
+          set -euo pipefail
+          cat > /tmp/cmt_link_probe.c <<'PROBE'
+          #include <libcma/parser.h>
+          #include <string.h>
+          int main(void) {
+              unsigned char payload[52];
+              memset(payload, 0, sizeof payload);
+              payload[19] = 1;    /* sender */
+              payload[51] = 4;    /* value  */
+              cmt_rollup_advance_t advance;
+              memset(&advance, 0, sizeof advance);
+              advance.payload.length = sizeof payload;
+              advance.payload.data = payload;
+              cma_parser_input_t out;
+              memset(&out, 0, sizeof out);
+              /* Forces parser_impl.o (and therefore libcmt) into the link. */
+              return cma_parser_decode_advance(
+                  CMA_PARSER_INPUT_TYPE_ETHER_DEPOSIT, &advance, &out) == 0 ? 0 : 1;
+          }
+          PROBE
+          docker run --platform linux/riscv64 --rm \
+            -v "$PWD":/mnt/app -v /tmp/cmt_link_probe.c:/tmp/cmt_link_probe.c \
+            -w /mnt/app libcma-builder \
+            bash -euxc '
+              g++ -std=c++20 -Iinclude -Ithird-party -x c++ /tmp/cmt_link_probe.c \
+                  -L build/riscv64 -lcma -lcmt -lstdc++ -o /tmp/cmt_link_probe
+              file /tmp/cmt_link_probe | grep -F "RISC-V"
+              /tmp/cmt_link_probe
+            '
+
   # ===========================================================================
   # TODO(cross-arch-differential): the ULTIMATE host<->machine reproducibility
   # invariant — not yet implemented (heavy: needs a riscv64 build AND running it
