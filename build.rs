@@ -161,6 +161,24 @@ fn main() {
             );
         }
 
+        // Hoisted out of the build block below: the link step also needs `cxx`, to ask the very
+        // compiler that built libcma where its matching libstdc++.a lives.
+        let (toolchain_prefix, cxx, cc, ar) = if host {
+            (
+                String::new(),
+                env::var("CMA_HOST_CXX").unwrap_or_else(|_| "g++".into()),
+                env::var("CMA_HOST_CC").unwrap_or_else(|_| "gcc".into()),
+                "ar".to_string(),
+            )
+        } else {
+            (
+                "riscv64-linux-gnu-".to_string(),
+                env::var("CMA_RISCV64_CXX").unwrap_or_else(|_| "riscv64-linux-gnu-g++-14".into()),
+                env::var("CMA_RISCV64_CC").unwrap_or_else(|_| "riscv64-linux-gnu-gcc-14".into()),
+                "riscv64-linux-gnu-ar".to_string(),
+            )
+        };
+
         if !artifacts_present || stale {
             // A stale stamp means the tree the objects were compiled from is gone. Make cannot be
             // trusted to notice: a `git checkout` of the submodule can leave source files with
@@ -175,23 +193,6 @@ fn main() {
                 std::fs::remove_dir_all(&lib_dir)
                     .expect("failed to clear the stale libcma object directory");
             }
-            let (toolchain_prefix, cxx, cc, ar) = if host {
-                (
-                    String::new(),
-                    env::var("CMA_HOST_CXX").unwrap_or_else(|_| "g++".into()),
-                    env::var("CMA_HOST_CC").unwrap_or_else(|_| "gcc".into()),
-                    "ar".to_string(),
-                )
-            } else {
-                (
-                    "riscv64-linux-gnu-".to_string(),
-                    env::var("CMA_RISCV64_CXX")
-                        .unwrap_or_else(|_| "riscv64-linux-gnu-g++-14".into()),
-                    env::var("CMA_RISCV64_CC")
-                        .unwrap_or_else(|_| "riscv64-linux-gnu-gcc-14".into()),
-                    "riscv64-linux-gnu-ar".to_string(),
-                )
-            };
 
             // machine-asset-tools' `third-party` target fetches Boost/emulator/guest-tools but not
             // nlohmann/json, so fetch that single header first.
@@ -291,17 +292,76 @@ fn main() {
         println!("cargo:rustc-link-lib=static=cma");
         // MUST come after `cma`: static archives are resolved left-to-right, and it is libcma's
         // parser_impl.o that references the cmt_abi_*/cmt_buf_* symbols, not the other way round.
-        if host {
-            println!("cargo:rustc-link-lib=static=cmt");
+        // Is the target being built with a static CRT? The Cartesi Rust application template sets
+        // `-C target-feature=+crt-static` in .cargo/config.toml, and it IS honoured for
+        // riscv64gc-unknown-linux-gnu: glibc gets linked in statically.
+        let crt_static = env::var("CARGO_CFG_TARGET_FEATURE")
+            .map(|f| f.split(',').any(|t| t == "crt-static"))
+            .unwrap_or(false);
+
+        if crt_static {
+            // Every remaining native dependency must be bound statically too, or the executable
+            // ends up with a static libc and a DYNAMIC libstdc++ — which still carries
+            // `INTERP /lib/ld.so.1`. That interpreter does not exist in the Cartesi machine's
+            // rootfs (Ubuntu riscv64 ships the loader as `/lib/ld-linux-riscv64-lp64d.so.1`), so
+            // the machine cannot exec the application and reports only
+            // `dapp failed to start with No such file or directory` — an error that names neither
+            // the loader nor libstdc++.
+            //
+            // libstdc++.a lives in the gcc-cross directories, which the LINKER searches but rustc
+            // does not — so `static=stdc++` alone fails with "could not find native static
+            // library". Ask the compiler that built libcma where its own libstdc++.a is and put
+            // that directory on rustc's search path, so the `static=` kind resolves AND lands in
+            // the correct place on the link line (after libcma.a, which references it).
+            //
+            // Passing `-l:libstdc++.a` as a raw link-arg does not work: rustc emits link-args
+            // BEFORE the native libraries, so the archive is already past by the time libcma's
+            // undefined `__cxa_*` references are seen, and the link fails.
+            match static_lib_dir(&cxx, "libstdc++.a") {
+                Some(dir) => {
+                    println!("cargo:rustc-link-search=native={dir}");
+                    println!("cargo:rustc-link-lib=static=stdc++");
+                }
+                None => panic!(
+                    "the target is built with +crt-static but `{cxx} -print-file-name=libstdc++.a` \
+                     did not locate a static libstdc++. Install the matching C++ toolchain (for \
+                     riscv64: g++-14-riscv64-linux-gnu), or drop `-C target-feature=+crt-static` \
+                     and ensure the runtime image provides libstdc++6."
+                ),
+            }
+            if !host {
+                // libcmt.a comes from the machine-guest-tools package staged into the cross
+                // sysroot. `-l:libcmt.a` would hit the same ordering problem, so bind it by
+                // directory too, taken from the sysroot the compiler reports.
+                match static_lib_dir(&cxx, "libcmt.a") {
+                    Some(dir) => {
+                        println!("cargo:rustc-link-search=native={dir}");
+                        println!("cargo:rustc-link-lib=static=cmt");
+                    }
+                    None => panic!(
+                        "the target is built with +crt-static but `{cxx} \
+                         -print-file-name=libcmt.a` did not locate a static libcmt. Stage \
+                         libcmt.a from the machine-guest-tools riscv64 package into the cross \
+                         sysroot — see the README section on the riscv64 libcmt requirement."
+                    ),
+                }
+            } else {
+                println!("cargo:rustc-link-lib=static=cmt");
+            }
         } else {
-            // Plain `-lcmt`, matching what upstream's own sample apps pass: resolves against the
-            // libcmt shipped by the machine-guest-tools package in the Cartesi app image.
-            println!("cargo:rustc-link-lib=cmt");
+            if host {
+                // We built this archive ourselves, in lib_dir, which is on rustc's search path.
+                println!("cargo:rustc-link-lib=static=cmt");
+            } else {
+                // Plain `-lcmt`, matching what upstream's own sample apps pass: resolves against
+                // the libcmt shipped by the machine-guest-tools package in the application image.
+                println!("cargo:rustc-link-lib=cmt");
+            }
+            // libcma is C++ (Boost.Interprocess/Unordered); link the C++ runtime after it so its
+            // vtables / __cxxabiv1 ABI symbols resolve. Dynamic so the cross gcc locates
+            // libstdc++.so automatically (the rootfs must then provide libstdc++6).
+            println!("cargo:rustc-link-lib=dylib=stdc++");
         }
-        // libcma is C++ (Boost.Interprocess/Unordered); link the C++ runtime after it so its
-        // vtables / __cxxabiv1 ABI symbols resolve. Dynamic so the cross gcc locates libstdc++.so
-        // automatically (the machine rootfs must provide libstdc++6).
-        println!("cargo:rustc-link-lib=dylib=stdc++");
     }
 
     println!("cargo:rerun-if-changed=wrapper.h");
@@ -360,6 +420,31 @@ fn build_stamp(manifest_dir: &Path, host: bool) -> String {
         rev("third_party/machine-guest-tools"),
         if host { "host" } else { "riscv64" },
     )
+}
+
+/// Directory containing the static library `archive` (e.g. `libstdc++.a`), as reported by the
+/// compiler driver `cc` via `-print-file-name`.
+///
+/// The driver searches its own library directories AND its sysroot, which is exactly where the
+/// C++ runtime and the staged libcmt live — and where rustc, which only knows its own
+/// `-L` paths, would never look. When the driver cannot find the file it echoes the bare name
+/// back unchanged, so a result without a directory component means "not found".
+fn static_lib_dir(cc: &str, archive: &str) -> Option<String> {
+    let out = Command::new(cc)
+        .arg(format!("-print-file-name={archive}"))
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let path = PathBuf::from(String::from_utf8(out.stdout).ok()?.trim());
+    if !path.is_absolute() || !path.exists() {
+        return None;
+    }
+    // Resolve `.../gcc-cross/riscv64-linux-gnu/14/../../../../riscv64-linux-gnu/lib/…` style
+    // answers to something rustc can use verbatim.
+    let path = path.canonicalize().ok()?;
+    Some(path.parent()?.to_str()?.to_string())
 }
 
 /// Return the directory holding GCC's builtin headers (stdbool.h, stddef.h…), if discoverable.

@@ -114,6 +114,37 @@ at the final link, as `undefined symbol: cmt_abi_get_uint`, `cmt_buf_split`, and
 friends. It surfaces only once something calls the C parser bindings, because
 static archive members are pulled lazily.
 
+#### `+crt-static` and the C++ runtime
+
+The Cartesi Rust template builds with `-C target-feature=+crt-static`, and that
+flag **is** honoured for `riscv64gc-unknown-linux-gnu` — glibc is linked in
+statically. A pure-Rust application therefore produces a fully static binary with
+no `PT_INTERP` at all, which is what the machine's rootfs expects.
+
+Pulling in a C++ library changes that. If libstdc++ were linked dynamically, the
+binary would keep a single `NEEDED libstdc++.so.6` and, with it, an interpreter
+of `/lib/ld.so.1` — a path that does **not** exist in the machine rootfs (Ubuntu
+riscv64 installs the loader as `/lib/ld-linux-riscv64-lp64d.so.1`). The machine
+then cannot exec the application and reports only:
+
+```
+WARN rollup_http_server::dapp_process] throwing exception because dapp failed to
+     start with No such file or directory (os error 2)
+```
+
+which names neither the loader nor libstdc++.
+
+So when `+crt-static` is set, `build.rs` binds libstdc++ and libcmt statically as
+well, locating each archive through `<compiler> -print-file-name=` so the paths
+come from the toolchain rather than being guessed. Nothing is required of the
+application beyond providing a C++ toolchain that ships `libstdc++.a` — the
+`g++-14-riscv64-linux-gnu` package does. Verify with:
+
+```console
+$ riscv64-linux-gnu-readelf -l dapp | grep -i interpreter   # expect no output
+$ riscv64-linux-gnu-readelf -d dapp | grep NEEDED           # expect no output
+```
+
 ### Determinism / reproducibility
 
 `host-real` and `riscv64` compile the C++ `libcma` with SIMD-free / generic flags

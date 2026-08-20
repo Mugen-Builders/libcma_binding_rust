@@ -85,6 +85,19 @@ While the crate is pre-1.0 (`0.0.x`), any release may contain breaking changes.
   against the new headers. The object directory is now stamped with the inputs
   that determine it (both submodule revisions, target arch, compiler overrides)
   and rebuilt from scratch when they change.
+- **`+crt-static` targets now link the C++ runtime statically too.** The Cartesi
+  Rust application template sets `-C target-feature=+crt-static`, which IS
+  honoured for `riscv64gc-unknown-linux-gnu`: glibc links in statically. But
+  `build.rs` requested libstdc++ as a *dylib*, leaving the application with a
+  static libc, a lone `NEEDED libstdc++.so.6`, and therefore an interpreter of
+  `/lib/ld.so.1` — a path that does not exist in the machine rootfs (Ubuntu
+  riscv64 ships the loader as `/lib/ld-linux-riscv64-lp64d.so.1`). The machine
+  could not exec the application at all, reporting only `dapp failed to start
+  with No such file or directory`, which names neither the loader nor libstdc++.
+  Under `+crt-static`, libstdc++ and libcmt are now bound statically, with each
+  archive located via `<compiler> -print-file-name=` so the paths come from the
+  toolchain. Verified end to end by booting a `cartesi create --template rust`
+  application on a real Cartesi machine.
 - **A partially-staged `third-party/libcmt` is now repaired automatically.**
   Upstream's staging target is a directory, whose mtime is always newer than the
   tarball it came from, so make treats an incomplete copy as up to date forever
