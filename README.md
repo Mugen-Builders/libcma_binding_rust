@@ -80,6 +80,40 @@ If you forget `default-features = false`, enabling `host-real` or `riscv64`
 alongside the default `mock` trips the mutual-exclusivity `compile_error!` — read
 its message; the fix is to disable default features.
 
+### `riscv64`: your application must supply `libcmt`
+
+`libcma.a` contains only libcma's own objects. Its parser references libcmt's C
+ABI helpers (`cmt_abi_*`, `cmt_buf_*`), so `build.rs` emits `-lcmt` for the
+`riscv64` backend and **`libcmt.a` must be on the linker's search path in the
+stage that cross-links your binary**. Upstream deliberately does not build libcmt
+for riscv64 — its real io backend needs the Cartesi Linux kernel headers, which
+exist only inside the guest — so it comes from the released `machine-guest-tools`
+package. (`host-real` needs nothing extra: `build.rs` builds and statically links
+`libcmt.a` itself, from the vendored sources with the mock io backend.)
+
+Installing machine-guest-tools in your application's *runtime* stage is **not
+enough** — by then the binary is already linked. Stage it into the cross sysroot
+of the build stage, using the same guest-tools version your runtime stage
+installs, so you link and run against one libcmt ABI:
+
+```dockerfile
+# in the cross-build stage, before `cargo build`
+ARG MACHINE_GUEST_TOOLS_VERSION
+ADD https://github.com/cartesi/machine-guest-tools/releases/download/v${MACHINE_GUEST_TOOLS_VERSION}/machine-guest-tools_riscv64.deb /tmp/gt.deb
+RUN dpkg-deb -x /tmp/gt.deb /tmp/gt && \
+    cp -a /tmp/gt/usr/lib/libcmt.a     /usr/riscv64-linux-gnu/lib/ && \
+    cp -a /tmp/gt/usr/include/libcmt   /usr/riscv64-linux-gnu/include/
+
+# libcma is C++20/23, so it needs GCC >= 14; the stock template installs 13.
+ENV CMA_RISCV64_CXX=riscv64-linux-gnu-g++-14 \
+    CMA_RISCV64_CC=riscv64-linux-gnu-gcc-14
+```
+
+Symptom if this is missing: the C++ compile succeeds and the failure appears only
+at the final link, as `undefined symbol: cmt_abi_get_uint`, `cmt_buf_split`, and
+friends. It surfaces only once something calls the C parser bindings, because
+static archive members are pulled lazily.
+
 ### Determinism / reproducibility
 
 `host-real` and `riscv64` compile the C++ `libcma` with SIMD-free / generic flags
