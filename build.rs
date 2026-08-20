@@ -138,17 +138,35 @@ fn main() {
         // records the inputs that determine the archive's contents; any change forces a rebuild.
         let stamp_path = lib_dir.join(".cma-build-stamp");
         let stamp = build_stamp(&manifest_dir, host);
-        let stamp_matches = std::fs::read_to_string(&stamp_path)
-            .map(|recorded| recorded.trim() == stamp.trim())
-            .unwrap_or(false);
+        let recorded_stamp = std::fs::read_to_string(&stamp_path).ok();
         let artifacts_present = lib_path.exists() && (!host || cmt_lib_path.exists());
 
-        if !artifacts_present || !stamp_matches {
+        // Three cases, deliberately distinguished:
+        //   - a stamp that DIFFERS  → we built this archive and its inputs moved: rebuild.
+        //   - NO stamp but archives present → the archive came from somewhere else (an
+        //     out-of-band `make docker` cross-build, a CI cache, a vendored artifact). That is a
+        //     supported workflow, so it is left alone — deleting it would strand anyone without a
+        //     local cross toolchain. Its provenance cannot be checked, so say so out loud.
+        //   - no archives → build.
+        let stale = recorded_stamp
+            .as_deref()
+            .is_some_and(|recorded| recorded.trim() != stamp.trim());
+
+        if artifacts_present && recorded_stamp.is_none() {
+            println!(
+                "cargo:warning=libcma_binding_rust: reusing the prebuilt {} — it carries no build \
+                 stamp, so it cannot be checked against the current submodule revisions. Delete \
+                 the directory to force a rebuild from source.",
+                lib_dir.display()
+            );
+        }
+
+        if !artifacts_present || stale {
             // A stale stamp means the tree the objects were compiled from is gone. Make cannot be
             // trusted to notice: a `git checkout` of the submodule can leave source files with
             // OLDER mtimes than the objects built from the previous revision, so an incremental
             // make would consider them up to date. Drop the whole object dir and rebuild clean.
-            if lib_dir.exists() && !stamp_matches {
+            if lib_dir.exists() && stale {
                 println!(
                     "cargo:warning=libcma_binding_rust: build inputs changed since {} was compiled \
                      — rebuilding from scratch.",
