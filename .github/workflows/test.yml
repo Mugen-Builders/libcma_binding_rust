@@ -17,6 +17,31 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # DEPENDENCIES.lock is the human-readable record of which upstream revisions the
+      # submodules are pinned to. It drifted from the actual pins before (it named
+      # machine-guest-tools v0.17.2 while the submodule sat on a later main commit), and a
+      # wrong record is worse than none when the question is "which libcmt is this built
+      # against?". Cheap to assert, so assert it on every push.
+      - name: Verify DEPENDENCIES.lock matches the submodule pins
+        run: |
+          set -euo pipefail
+          status=0
+          while read -r repo tag sha; do
+            [[ -z "${repo:-}" || "${repo:0:1}" == "#" ]] && continue
+            path="third_party/${repo##*/}"
+            actual=$(git ls-tree HEAD "$path" | awk '{print $3}')
+            if [[ -z "$actual" ]]; then
+              echo "::error::DEPENDENCIES.lock names $repo but $path is not a submodule of this tree"
+              status=1
+            elif [[ "$actual" != "$sha" ]]; then
+              echo "::error::$repo ($tag): DEPENDENCIES.lock says $sha, $path is pinned to $actual"
+              status=1
+            else
+              echo "ok: $repo $tag $sha"
+            fi
+          done < DEPENDENCIES.lock
+          exit $status
+
       - name: Install libclang for bindgen
         run: sudo apt-get update && sudo apt-get install -y clang libclang-dev
 

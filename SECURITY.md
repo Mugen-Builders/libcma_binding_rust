@@ -23,6 +23,20 @@ Please include a description, the affected version(s), and reproduction steps
 where possible. You can expect an initial acknowledgement within a reasonable
 time frame; we will then coordinate a fix and a disclosure timeline with you.
 
+## Vendored C/C++ dependencies
+
+The real backends compile libcma (and, on the host, libcmt) from the sources in
+`third_party/`, which are git submodules pinned by **commit SHA** — never by tag
+name. This is deliberate: upstream tags are mutable. `v0.1.0-alpha.8` of
+machine-asset-tools has already been force-moved once, and a fetch of a
+re-pointed tag would silently change what gets compiled if we tracked tag names.
+`DEPENDENCIES.lock` records the pinned revisions in readable form and CI asserts
+it matches the actual submodule pins.
+
+The one dependency fetched over the network at build time rather than pinned as
+a submodule is the nlohmann/json single header, so `build.rs` verifies it
+against a SHA-256 pinned in that file. A mismatch fails the build.
+
 ## Scope note
 
 The default `mock` backend is an in-memory stub for development and testing — it
