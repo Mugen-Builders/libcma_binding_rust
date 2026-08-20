@@ -129,7 +129,34 @@ fn main() {
         //   - riscv64: the RISC-V GCC 14 cross toolchain (g++-14-riscv64-linux-gnu / gcc-14-…).
         //   - host-real: a host C++ toolchain with g++ >= 14 (C++20/C++23) and Boost is fetched.
         // Override the compiler names with CMA_RISCV64_CXX/CC or CMA_HOST_CXX/CC.
-        if !lib_path.exists() || (host && !cmt_lib_path.exists()) {
+        //
+        // Presence alone is NOT a sufficient cache key. `libcma.a` is compiled from the
+        // machine-asset-tools submodule, but nothing about the archive records WHICH revision it
+        // came from, so bumping the submodule used to leave a stale archive in place and silently
+        // link yesterday's libcma against today's headers — exactly the kind of skew the bindgen
+        // layout assertions cannot catch, because they only ever see the headers. The stamp below
+        // records the inputs that determine the archive's contents; any change forces a rebuild.
+        let stamp_path = lib_dir.join(".cma-build-stamp");
+        let stamp = build_stamp(&manifest_dir, host);
+        let stamp_matches = std::fs::read_to_string(&stamp_path)
+            .map(|recorded| recorded.trim() == stamp.trim())
+            .unwrap_or(false);
+        let artifacts_present = lib_path.exists() && (!host || cmt_lib_path.exists());
+
+        if !artifacts_present || !stamp_matches {
+            // A stale stamp means the tree the objects were compiled from is gone. Make cannot be
+            // trusted to notice: a `git checkout` of the submodule can leave source files with
+            // OLDER mtimes than the objects built from the previous revision, so an incremental
+            // make would consider them up to date. Drop the whole object dir and rebuild clean.
+            if lib_dir.exists() && !stamp_matches {
+                println!(
+                    "cargo:warning=libcma_binding_rust: build inputs changed since {} was compiled \
+                     — rebuilding from scratch.",
+                    lib_dir.display()
+                );
+                std::fs::remove_dir_all(&lib_dir)
+                    .expect("failed to clear the stale libcma object directory");
+            }
             let (toolchain_prefix, cxx, cc, ar) = if host {
                 (
                     String::new(),
@@ -233,6 +260,10 @@ fn main() {
                 "libcmt.a build did not produce {}",
                 cmt_lib_path.display()
             );
+
+            // Written only after the archives exist, so an interrupted or failed build leaves no
+            // stamp and the next run rebuilds rather than trusting a half-built object dir.
+            std::fs::write(&stamp_path, &stamp).expect("failed to write the libcma build stamp");
         }
 
         println!(
@@ -258,6 +289,59 @@ fn main() {
     println!("cargo:rerun-if-changed=wrapper.h");
     println!("cargo:rerun-if-changed=third_party/machine-asset-tools/include/");
     println!("cargo:rerun-if-changed=third_party/machine-guest-tools/sys-utils/libcmt/include/");
+}
+
+/// Identity of everything that determines the contents of the prebuilt `libcma.a`/`libcmt.a`.
+///
+/// Compared against the stamp stored beside the archives to decide whether a cached build is
+/// still valid. Covers:
+///   - the checked-out revision of each submodule the C++ is compiled from (the reason this
+///     exists: a submodule bump must invalidate the archive);
+///   - the target arch, since host and cross objects are not interchangeable;
+///   - the compiler overrides, since switching toolchains changes the objects.
+///
+/// The submodule revisions come from `git -C <path> rev-parse HEAD` rather than from the
+/// gitlink, so a locally checked-out or dirty submodule is also distinguished. A checkout with
+/// no usable git (a vendored tarball, say) reports `unknown`, which keeps the stamp stable and
+/// falls back to plain presence-caching rather than rebuilding on every single run.
+fn build_stamp(manifest_dir: &Path, host: bool) -> String {
+    let rev = |sub: &str| -> String {
+        Command::new("git")
+            .args([
+                "-C",
+                manifest_dir.join(sub).to_str().unwrap_or("."),
+                "rev-parse",
+                "HEAD",
+            ])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "unknown".to_string())
+    };
+
+    let (cxx, cc) = if host {
+        (
+            env::var("CMA_HOST_CXX").unwrap_or_else(|_| "g++".into()),
+            env::var("CMA_HOST_CC").unwrap_or_else(|_| "gcc".into()),
+        )
+    } else {
+        (
+            env::var("CMA_RISCV64_CXX").unwrap_or_else(|_| "riscv64-linux-gnu-g++-14".into()),
+            env::var("CMA_RISCV64_CC").unwrap_or_else(|_| "riscv64-linux-gnu-gcc-14".into()),
+        )
+    };
+
+    // Line-oriented and human-readable on purpose: when a rebuild is triggered unexpectedly, the
+    // stamp file is the first thing anyone will `cat`.
+    format!(
+        "machine-asset-tools={}\nmachine-guest-tools={}\narch={}\ncxx={cxx}\ncc={cc}\n",
+        rev("third_party/machine-asset-tools"),
+        rev("third_party/machine-guest-tools"),
+        if host { "host" } else { "riscv64" },
+    )
 }
 
 /// Return the directory holding GCC's builtin headers (stdbool.h, stddef.h…), if discoverable.

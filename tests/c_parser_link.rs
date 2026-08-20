@@ -63,7 +63,10 @@ fn c_parser_decodes_ether_deposit_vector() {
             &mut out,
         )
     };
-    assert_eq!(rc, 0, "C parser rejected the canonical ether-deposit vector");
+    assert_eq!(
+        rc, 0,
+        "C parser rejected the canonical ether-deposit vector"
+    );
     assert_eq!(
         out.type_,
         bindings::cma_parser_input_type_t_CMA_PARSER_INPUT_TYPE_ETHER_DEPOSIT
