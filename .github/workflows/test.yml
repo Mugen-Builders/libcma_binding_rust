@@ -164,7 +164,7 @@ jobs:
         working-directory: third_party/machine-asset-tools
         run: |
           set -euo pipefail
-          cat > /tmp/cmt_link_probe.c <<'PROBE'
+          cat > cmt_link_probe.c <<'PROBE'
           #include <libcma/parser.h>
           #include <string.h>
           int main(void) {
@@ -183,15 +183,62 @@ jobs:
                   CMA_PARSER_INPUT_TYPE_ETHER_DEPOSIT, &advance, &out) == 0 ? 0 : 1;
           }
           PROBE
+          # The probe is written into the working directory rather than /tmp so that the single
+          # existing mount carries it — a second `-v /tmp/...` bind is refused outright by Docker
+          # Desktop, which does not share /tmp by default.
+          trap 'rm -f cmt_link_probe.c' EXIT
           docker run --platform linux/riscv64 --rm \
-            -v "$PWD":/mnt/app -v /tmp/cmt_link_probe.c:/tmp/cmt_link_probe.c \
-            -w /mnt/app libcma-builder \
+            -v "$PWD":/mnt/app -w /mnt/app libcma-builder \
             bash -euxc '
-              g++ -std=c++20 -Iinclude -Ithird-party -x c++ /tmp/cmt_link_probe.c \
+              g++ -std=c++20 -Iinclude -Ithird-party -x c++ cmt_link_probe.c \
                   -L build/riscv64 -lcma -lcmt -lstdc++ -o /tmp/cmt_link_probe
               file /tmp/cmt_link_probe | grep -F "RISC-V"
               /tmp/cmt_link_probe
             '
+
+      # The above proves the C side links. This proves what a real Cartesi application needs:
+      # that the CRATE cross-links into a FULLY STATIC riscv64 executable.
+      #
+      # It has to be an executable — `cargo build` on a library only emits an rlib, whose members
+      # are pulled lazily, so a library build cannot see a missing or wrongly-bound native
+      # dependency. And it has to be static: the Cartesi machine's rootfs has no `/lib/ld.so.1`,
+      # so an application retaining any NEEDED entry cannot be exec'd, and the machine says only
+      # `dapp failed to start with No such file or directory`. A dynamically-bound libstdc++ used
+      # to slip through exactly here.
+      - name: Cross-link a fully static riscv64 Rust binary
+        env:
+          CMA_RISCV64_CXX: riscv64-linux-gnu-g++-14
+          CMA_RISCV64_CC: riscv64-linux-gnu-gcc-14
+          MACHINE_GUEST_TOOLS_VERSION: "0.18.0"
+        run: |
+          set -euxo pipefail
+          sudo apt-get install -y --no-install-recommends \
+            g++-14-riscv64-linux-gnu gcc-14-riscv64-linux-gnu binutils-riscv64-linux-gnu
+          rustup target add riscv64gc-unknown-linux-gnu
+
+          # Stage libcmt.a from the machine-guest-tools package into the cross sysroot, the same
+          # way an application Dockerfile must (see the README).
+          curl -fsSL -o /tmp/gt.deb \
+            "https://github.com/cartesi/machine-guest-tools/releases/download/v${MACHINE_GUEST_TOOLS_VERSION}/machine-guest-tools_riscv64.deb"
+          dpkg-deb -x /tmp/gt.deb /tmp/gt
+          sudo cp -a /tmp/gt/usr/lib/libcmt.a   /usr/riscv64-linux-gnu/lib/
+          sudo cp -a /tmp/gt/usr/include/libcmt /usr/riscv64-linux-gnu/include/
+
+          RUSTFLAGS="-C target-feature=+crt-static -C linker=riscv64-linux-gnu-g++-14" \
+            cargo build --release --no-default-features --features riscv64 \
+              --target riscv64gc-unknown-linux-gnu --example link_probe
+
+          bin=target/riscv64gc-unknown-linux-gnu/release/examples/link_probe
+          file "$bin" | grep -F 'RISC-V'
+          if riscv64-linux-gnu-readelf -l "$bin" | grep -i 'interpreter'; then
+            echo "::error::riscv64 binary requests an ELF interpreter; the machine rootfs has no /lib/ld.so.1"
+            exit 1
+          fi
+          if riscv64-linux-gnu-readelf -d "$bin" 2>/dev/null | grep 'NEEDED'; then
+            echo "::error::riscv64 binary has dynamic dependencies; it must be fully static"
+            exit 1
+          fi
+          echo "ok: fully static riscv64 executable, no interpreter and no NEEDED entries"
 
   # ===========================================================================
   # TODO(cross-arch-differential): the ULTIMATE host<->machine reproducibility
