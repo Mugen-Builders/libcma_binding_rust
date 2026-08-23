@@ -201,33 +201,64 @@ jobs:
               /tmp/cmt_link_probe
             '
 
-      # The above proves the C side links. This proves what a real Cartesi application needs:
-      # that the CRATE cross-links into a FULLY STATIC riscv64 executable.
-      #
-      # It has to be an executable — `cargo build` on a library only emits an rlib, whose members
-      # are pulled lazily, so a library build cannot see a missing or wrongly-bound native
-      # dependency. And it has to be static: the Cartesi machine's rootfs has no `/lib/ld.so.1`,
-      # so an application retaining any NEEDED entry cannot be exec'd, and the machine says only
-      # `dapp failed to start with No such file or directory`. A dynamically-bound libstdc++ used
-      # to slip through exactly here.
-      - name: Cross-link a fully static riscv64 Rust binary
-        env:
-          CMA_RISCV64_CXX: riscv64-linux-gnu-g++-14
-          CMA_RISCV64_CC: riscv64-linux-gnu-gcc-14
-          MACHINE_GUEST_TOOLS_VERSION: "0.18.0"
+
+  # The riscv64 backend as an APPLICATION consumes it: cross-compiled and linked into a
+  # fully static executable. Split out of riscv-link-check deliberately — that job runs a
+  # riscv64 container under QEMU, which is slow, and none of this needs emulation. build.rs
+  # cross-compiles libcma natively with the RISC-V GCC 14 toolchain, so the two jobs run in
+  # parallel and the wall clock is the slower of the two rather than their sum.
+  #
+  # Why an executable: `cargo build` on a library only emits an rlib, whose members are pulled
+  # lazily, so a library build cannot see a missing or wrongly-bound native dependency.
+  # Why static: the Cartesi machine rootfs has no `/lib/ld.so.1`, so an application retaining
+  # any NEEDED entry cannot be exec'd, and the machine reports only
+  # `dapp failed to start with No such file or directory`. A dynamically-bound libstdc++ used
+  # to slip through exactly here.
+  riscv-rust-link:
+    runs-on: ubuntu-latest
+    env:
+      CMA_RISCV64_CXX: riscv64-linux-gnu-g++-14
+      CMA_RISCV64_CC: riscv64-linux-gnu-gcc-14
+      # Must match the version the application runtime image installs, so the app links and
+      # runs against one libcmt ABI. Keep in step with DEPENDENCIES.lock.
+      MACHINE_GUEST_TOOLS_VERSION: "0.18.0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install the RISC-V GCC 14 cross toolchain + bindgen deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            g++-14-riscv64-linux-gnu gcc-14-riscv64-linux-gnu binutils-riscv64-linux-gnu \
+            clang libclang-dev build-essential make wget curl
+
+      # Boost is ~210 MB and build.rs fetches it through machine-asset-tools' Makefile. Cache
+      # the download so only the first run on a given Boost version pays for it.
+      - name: Cache third-party downloads
+        uses: actions/cache@v4
+        with:
+          path: third_party/machine-asset-tools/third-party/downloads
+          key: mat-downloads-${{ hashFiles('third_party/machine-asset-tools/Makefile') }}
+
+      - name: Stage riscv64 libcmt into the cross sysroot
         run: |
           set -euxo pipefail
-          sudo apt-get install -y --no-install-recommends \
-            g++-14-riscv64-linux-gnu gcc-14-riscv64-linux-gnu binutils-riscv64-linux-gnu
-          rustup target add riscv64gc-unknown-linux-gnu
-
-          # Stage libcmt.a from the machine-guest-tools package into the cross sysroot, the same
-          # way an application Dockerfile must (see the README).
+          # Exactly what an application Dockerfile must do — see the README section on the
+          # riscv64 libcmt requirement. libcma.a does not contain libcmt's cmt_abi_*/cmt_buf_*.
           curl -fsSL -o /tmp/gt.deb \
             "https://github.com/cartesi/machine-guest-tools/releases/download/v${MACHINE_GUEST_TOOLS_VERSION}/machine-guest-tools_riscv64.deb"
           dpkg-deb -x /tmp/gt.deb /tmp/gt
           sudo cp -a /tmp/gt/usr/lib/libcmt.a   /usr/riscv64-linux-gnu/lib/
           sudo cp -a /tmp/gt/usr/include/libcmt /usr/riscv64-linux-gnu/include/
+
+      - name: Cross-link a fully static riscv64 Rust binary
+        run: |
+          set -euxo pipefail
+          rustup target add riscv64gc-unknown-linux-gnu
 
           RUSTFLAGS="-C target-feature=+crt-static -C linker=riscv64-linux-gnu-g++-14" \
             cargo build --release --no-default-features --features riscv64 \
