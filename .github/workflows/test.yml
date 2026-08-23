@@ -192,7 +192,12 @@ jobs:
             bash -euxc '
               g++ -std=c++20 -Iinclude -Ithird-party -x c++ cmt_link_probe.c \
                   -L build/riscv64 -lcma -lcmt -lstdc++ -o /tmp/cmt_link_probe
-              file /tmp/cmt_link_probe | grep -F "RISC-V"
+              # `readelf`, not `file`: the builder image ships binutils (it has g++) but no
+              # file(1). The neighbouring artifact check can use file(1) because it runs on the
+              # runner rather than inside this container.
+              readelf -h /tmp/cmt_link_probe | grep -F "RISC-V"
+              # Runs natively here (the container IS riscv64), so this also proves the linked
+              # C parser actually decodes the vector rather than merely resolving symbols.
               /tmp/cmt_link_probe
             '
 
