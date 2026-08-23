@@ -101,6 +101,25 @@ fn main() {
         let obj_subdir = if host { "build/host" } else { "build/riscv64" };
         let lib_dir = mat.join(obj_subdir);
         let lib_path = lib_dir.join("libcma.a");
+        // libcma.a archives ONLY libcma's own objects (ledger*, parser*, utils). `parser_impl.o`
+        // references libcmt's C ABI helpers (cmt_abi_*, cmt_buf_*) and those symbols are NOT in
+        // the archive, so libcmt must be linked alongside it. Where libcmt comes from is
+        // arch-dependent — see `cmt_lib_path` below.
+        //
+        // This is easy to miss because archive members are pulled lazily: nothing in this crate's
+        // own code path calls the C parser (parser.rs is pure Rust over alloy), so `parser_impl.o`
+        // is never pulled and the missing symbols stay invisible until a DOWNSTREAM consumer calls
+        // cma_parser_decode_advance/inspect or cma_parser_encode_voucher — at which point the link
+        // fails with a dozen `undefined symbol: cmt_abi_*`. tests/c_parser_link.rs forces exactly
+        // that pull so the regression cannot come back unnoticed.
+        //
+        // riscv64: upstream deliberately does NOT build libcmt from source (its real io backend
+        // needs the cartesi Linux kernel headers, which exist only inside the guest). It comes
+        // from the machine-guest-tools package installed in the app image, so we emit a plain
+        // `-lcmt` and let the image supply it.
+        // host: the Makefile builds it from the vendored guest-tools sources with the mock io
+        // backend, so we build and statically link that archive.
+        let cmt_lib_path = lib_dir.join("libcmt.a");
 
         // Build libcma.a from source if it isn't already present. This is what lets the crate be
         // consumed as a plain `git`/`crates.io` dependency WITHOUT vendoring a prebuilt archive.
@@ -110,24 +129,70 @@ fn main() {
         //   - riscv64: the RISC-V GCC 14 cross toolchain (g++-14-riscv64-linux-gnu / gcc-14-…).
         //   - host-real: a host C++ toolchain with g++ >= 14 (C++20/C++23) and Boost is fetched.
         // Override the compiler names with CMA_RISCV64_CXX/CC or CMA_HOST_CXX/CC.
-        if !lib_path.exists() {
-            let (toolchain_prefix, cxx, cc, ar) = if host {
-                (
-                    String::new(),
-                    env::var("CMA_HOST_CXX").unwrap_or_else(|_| "g++".into()),
-                    env::var("CMA_HOST_CC").unwrap_or_else(|_| "gcc".into()),
-                    "ar".to_string(),
-                )
-            } else {
-                (
-                    "riscv64-linux-gnu-".to_string(),
-                    env::var("CMA_RISCV64_CXX")
-                        .unwrap_or_else(|_| "riscv64-linux-gnu-g++-14".into()),
-                    env::var("CMA_RISCV64_CC")
-                        .unwrap_or_else(|_| "riscv64-linux-gnu-gcc-14".into()),
-                    "riscv64-linux-gnu-ar".to_string(),
-                )
-            };
+        //
+        // Presence alone is NOT a sufficient cache key. `libcma.a` is compiled from the
+        // machine-asset-tools submodule, but nothing about the archive records WHICH revision it
+        // came from, so bumping the submodule used to leave a stale archive in place and silently
+        // link yesterday's libcma against today's headers — exactly the kind of skew the bindgen
+        // layout assertions cannot catch, because they only ever see the headers. The stamp below
+        // records the inputs that determine the archive's contents; any change forces a rebuild.
+        let stamp_path = lib_dir.join(".cma-build-stamp");
+        let stamp = build_stamp(&manifest_dir, host);
+        let recorded_stamp = std::fs::read_to_string(&stamp_path).ok();
+        let artifacts_present = lib_path.exists() && (!host || cmt_lib_path.exists());
+
+        // Three cases, deliberately distinguished:
+        //   - a stamp that DIFFERS  → we built this archive and its inputs moved: rebuild.
+        //   - NO stamp but archives present → the archive came from somewhere else (an
+        //     out-of-band `make docker` cross-build, a CI cache, a vendored artifact). That is a
+        //     supported workflow, so it is left alone — deleting it would strand anyone without a
+        //     local cross toolchain. Its provenance cannot be checked, so say so out loud.
+        //   - no archives → build.
+        let stale = recorded_stamp
+            .as_deref()
+            .is_some_and(|recorded| recorded.trim() != stamp.trim());
+
+        if artifacts_present && recorded_stamp.is_none() {
+            println!(
+                "cargo:warning=libcma_binding_rust: reusing the prebuilt {} — it carries no build \
+                 stamp, so it cannot be checked against the current submodule revisions. Delete \
+                 the directory to force a rebuild from source.",
+                lib_dir.display()
+            );
+        }
+
+        // Hoisted out of the build block below: the link step also needs `cxx`, to ask the very
+        // compiler that built libcma where its matching libstdc++.a lives.
+        let (toolchain_prefix, cxx, cc, ar) = if host {
+            (
+                String::new(),
+                env::var("CMA_HOST_CXX").unwrap_or_else(|_| "g++".into()),
+                env::var("CMA_HOST_CC").unwrap_or_else(|_| "gcc".into()),
+                "ar".to_string(),
+            )
+        } else {
+            (
+                "riscv64-linux-gnu-".to_string(),
+                env::var("CMA_RISCV64_CXX").unwrap_or_else(|_| "riscv64-linux-gnu-g++-14".into()),
+                env::var("CMA_RISCV64_CC").unwrap_or_else(|_| "riscv64-linux-gnu-gcc-14".into()),
+                "riscv64-linux-gnu-ar".to_string(),
+            )
+        };
+
+        if !artifacts_present || stale {
+            // A stale stamp means the tree the objects were compiled from is gone. Make cannot be
+            // trusted to notice: a `git checkout` of the submodule can leave source files with
+            // OLDER mtimes than the objects built from the previous revision, so an incremental
+            // make would consider them up to date. Drop the whole object dir and rebuild clean.
+            if lib_dir.exists() && stale {
+                println!(
+                    "cargo:warning=libcma_binding_rust: build inputs changed since {} was compiled \
+                     — rebuilding from scratch.",
+                    lib_dir.display()
+                );
+                std::fs::remove_dir_all(&lib_dir)
+                    .expect("failed to clear the stale libcma object directory");
+            }
 
             // machine-asset-tools' `third-party` target fetches Boost/emulator/guest-tools but not
             // nlohmann/json, so fetch that single header first.
@@ -151,6 +216,19 @@ fn main() {
             // corrupted cache is caught too. A mismatch is a hard, un-ignorable build failure.
             verify_sha256(&nlohmann, NLOHMANN_JSON_SHA256);
 
+            // Self-heal a partially-staged libcmt. Upstream's `third-party/libcmt` make target is a
+            // DIRECTORY, and a directory's mtime is trivially newer than the tarball it was
+            // extracted from, so make considers any existing copy up to date and never repairs it.
+            // A checkout that was staged by an older revision therefore keeps a headers-only
+            // directory forever, and the libcmt compile dies on
+            // `third-party/libcmt/src/buf.c: No such file or directory`. Removing it forces a clean
+            // re-extraction of both the headers and the sources.
+            let staged_cmt = mat.join("third-party/libcmt");
+            if staged_cmt.exists() && !staged_cmt.join("src/buf.c").exists() {
+                std::fs::remove_dir_all(&staged_cmt)
+                    .expect("failed to clear the partially-staged third-party/libcmt directory");
+            }
+
             // Download + stage the third-party deps, then compile the static archive. The Makefile
             // hardcodes `libcma_OBJDIR := build/riscv64`; override it so the host build lands in its
             // own dir (command-line assignments beat the Makefile's `:=`).
@@ -171,16 +249,24 @@ fn main() {
                 ],
                 &mat,
             );
+            // On the host, build libcmt.a in the same invocation. On riscv64 the Makefile leaves
+            // `libcmt_LIB` empty on purpose (see the comment on `cmt_lib_path`), so asking for the
+            // target there would fail with "no rule to make target".
+            let mut targets = vec![format!("{obj_subdir}/libcma.a")];
+            if host {
+                targets.push(format!("{obj_subdir}/libcmt.a"));
+            }
+            let mut make_args: Vec<String> = targets;
+            make_args.extend([
+                format!("libcma_OBJDIR={obj_subdir}"),
+                format!("TOOLCHAIN_PREFIX={toolchain_prefix}"),
+                format!("CXX={cxx}"),
+                format!("CC={cc}"),
+                format!("AR={ar}"),
+            ]);
             run(
                 "make",
-                &[
-                    &format!("{obj_subdir}/libcma.a"),
-                    &format!("libcma_OBJDIR={obj_subdir}"),
-                    &format!("TOOLCHAIN_PREFIX={toolchain_prefix}"),
-                    &format!("CXX={cxx}"),
-                    &format!("CC={cc}"),
-                    &format!("AR={ar}"),
-                ],
+                &make_args.iter().map(String::as_str).collect::<Vec<_>>(),
                 &mat,
             );
             assert!(
@@ -188,6 +274,15 @@ fn main() {
                 "libcma.a build did not produce {}",
                 lib_path.display()
             );
+            assert!(
+                !host || cmt_lib_path.exists(),
+                "libcmt.a build did not produce {}",
+                cmt_lib_path.display()
+            );
+
+            // Written only after the archives exist, so an interrupted or failed build leaves no
+            // stamp and the next run rebuilds rather than trusting a half-built object dir.
+            std::fs::write(&stamp_path, &stamp).expect("failed to write the libcma build stamp");
         }
 
         println!(
@@ -195,15 +290,161 @@ fn main() {
             lib_dir.canonicalize().unwrap().display()
         );
         println!("cargo:rustc-link-lib=static=cma");
-        // libcma is C++ (Boost.Interprocess/Unordered); link the C++ runtime after it so its
-        // vtables / __cxxabiv1 ABI symbols resolve. Dynamic so the cross gcc locates libstdc++.so
-        // automatically (the machine rootfs must provide libstdc++6).
-        println!("cargo:rustc-link-lib=dylib=stdc++");
+        // MUST come after `cma`: static archives are resolved left-to-right, and it is libcma's
+        // parser_impl.o that references the cmt_abi_*/cmt_buf_* symbols, not the other way round.
+        // Is the target being built with a static CRT? The Cartesi Rust application template sets
+        // `-C target-feature=+crt-static` in .cargo/config.toml, and it IS honoured for
+        // riscv64gc-unknown-linux-gnu: glibc gets linked in statically.
+        let crt_static = env::var("CARGO_CFG_TARGET_FEATURE")
+            .map(|f| f.split(',').any(|t| t == "crt-static"))
+            .unwrap_or(false);
+
+        if crt_static {
+            // Every remaining native dependency must be bound statically too, or the executable
+            // ends up with a static libc and a DYNAMIC libstdc++ — which still carries
+            // `INTERP /lib/ld.so.1`. That interpreter does not exist in the Cartesi machine's
+            // rootfs (Ubuntu riscv64 ships the loader as `/lib/ld-linux-riscv64-lp64d.so.1`), so
+            // the machine cannot exec the application and reports only
+            // `dapp failed to start with No such file or directory` — an error that names neither
+            // the loader nor libstdc++.
+            //
+            // libstdc++.a lives in the gcc-cross directories, which the LINKER searches but rustc
+            // does not — so `static=stdc++` alone fails with "could not find native static
+            // library". Ask the compiler that built libcma where its own libstdc++.a is and put
+            // that directory on rustc's search path, so the `static=` kind resolves AND lands in
+            // the correct place on the link line (after libcma.a, which references it).
+            //
+            // Passing `-l:libstdc++.a` as a raw link-arg does not work: rustc emits link-args
+            // BEFORE the native libraries, so the archive is already past by the time libcma's
+            // undefined `__cxa_*` references are seen, and the link fails.
+            match static_lib_dir(&cxx, "libstdc++.a") {
+                Some(dir) => {
+                    println!("cargo:rustc-link-search=native={dir}");
+                    println!("cargo:rustc-link-lib=static=stdc++");
+                }
+                None => panic!(
+                    "the target is built with +crt-static but `{cxx} -print-file-name=libstdc++.a` \
+                     did not locate a static libstdc++. Install the matching C++ toolchain (for \
+                     riscv64: g++-14-riscv64-linux-gnu), or drop `-C target-feature=+crt-static` \
+                     and ensure the runtime image provides libstdc++6."
+                ),
+            }
+            if !host {
+                // libcmt.a comes from the machine-guest-tools package staged into the cross
+                // sysroot. `-l:libcmt.a` would hit the same ordering problem, so bind it by
+                // directory too, taken from the sysroot the compiler reports.
+                match static_lib_dir(&cxx, "libcmt.a") {
+                    Some(dir) => {
+                        println!("cargo:rustc-link-search=native={dir}");
+                        println!("cargo:rustc-link-lib=static=cmt");
+                    }
+                    None => panic!(
+                        "the target is built with +crt-static but `{cxx} \
+                         -print-file-name=libcmt.a` did not locate a static libcmt. Stage \
+                         libcmt.a from the machine-guest-tools riscv64 package into the cross \
+                         sysroot — see the README section on the riscv64 libcmt requirement."
+                    ),
+                }
+            } else {
+                println!("cargo:rustc-link-lib=static=cmt");
+            }
+        } else {
+            if host {
+                // We built this archive ourselves, in lib_dir, which is on rustc's search path.
+                println!("cargo:rustc-link-lib=static=cmt");
+            } else {
+                // Plain `-lcmt`, matching what upstream's own sample apps pass: resolves against
+                // the libcmt shipped by the machine-guest-tools package in the application image.
+                println!("cargo:rustc-link-lib=cmt");
+            }
+            // libcma is C++ (Boost.Interprocess/Unordered); link the C++ runtime after it so its
+            // vtables / __cxxabiv1 ABI symbols resolve. Dynamic so the cross gcc locates
+            // libstdc++.so automatically (the rootfs must then provide libstdc++6).
+            println!("cargo:rustc-link-lib=dylib=stdc++");
+        }
     }
 
     println!("cargo:rerun-if-changed=wrapper.h");
     println!("cargo:rerun-if-changed=third_party/machine-asset-tools/include/");
     println!("cargo:rerun-if-changed=third_party/machine-guest-tools/sys-utils/libcmt/include/");
+}
+
+/// Identity of everything that determines the contents of the prebuilt `libcma.a`/`libcmt.a`.
+///
+/// Compared against the stamp stored beside the archives to decide whether a cached build is
+/// still valid. Covers:
+///   - the checked-out revision of each submodule the C++ is compiled from (the reason this
+///     exists: a submodule bump must invalidate the archive);
+///   - the target arch, since host and cross objects are not interchangeable;
+///   - the compiler overrides, since switching toolchains changes the objects.
+///
+/// The submodule revisions come from `git -C <path> rev-parse HEAD` rather than from the
+/// gitlink, so a locally checked-out or dirty submodule is also distinguished. A checkout with
+/// no usable git (a vendored tarball, say) reports `unknown`, which keeps the stamp stable and
+/// falls back to plain presence-caching rather than rebuilding on every single run.
+fn build_stamp(manifest_dir: &Path, host: bool) -> String {
+    let rev = |sub: &str| -> String {
+        Command::new("git")
+            .args([
+                "-C",
+                manifest_dir.join(sub).to_str().unwrap_or("."),
+                "rev-parse",
+                "HEAD",
+            ])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "unknown".to_string())
+    };
+
+    let (cxx, cc) = if host {
+        (
+            env::var("CMA_HOST_CXX").unwrap_or_else(|_| "g++".into()),
+            env::var("CMA_HOST_CC").unwrap_or_else(|_| "gcc".into()),
+        )
+    } else {
+        (
+            env::var("CMA_RISCV64_CXX").unwrap_or_else(|_| "riscv64-linux-gnu-g++-14".into()),
+            env::var("CMA_RISCV64_CC").unwrap_or_else(|_| "riscv64-linux-gnu-gcc-14".into()),
+        )
+    };
+
+    // Line-oriented and human-readable on purpose: when a rebuild is triggered unexpectedly, the
+    // stamp file is the first thing anyone will `cat`.
+    format!(
+        "machine-asset-tools={}\nmachine-guest-tools={}\narch={}\ncxx={cxx}\ncc={cc}\n",
+        rev("third_party/machine-asset-tools"),
+        rev("third_party/machine-guest-tools"),
+        if host { "host" } else { "riscv64" },
+    )
+}
+
+/// Directory containing the static library `archive` (e.g. `libstdc++.a`), as reported by the
+/// compiler driver `cc` via `-print-file-name`.
+///
+/// The driver searches its own library directories AND its sysroot, which is exactly where the
+/// C++ runtime and the staged libcmt live — and where rustc, which only knows its own
+/// `-L` paths, would never look. When the driver cannot find the file it echoes the bare name
+/// back unchanged, so a result without a directory component means "not found".
+fn static_lib_dir(cc: &str, archive: &str) -> Option<String> {
+    let out = Command::new(cc)
+        .arg(format!("-print-file-name={archive}"))
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let path = PathBuf::from(String::from_utf8(out.stdout).ok()?.trim());
+    if !path.is_absolute() || !path.exists() {
+        return None;
+    }
+    // Resolve `.../gcc-cross/riscv64-linux-gnu/14/../../../../riscv64-linux-gnu/lib/…` style
+    // answers to something rustc can use verbatim.
+    let path = path.canonicalize().ok()?;
+    Some(path.parent()?.to_str()?.to_string())
 }
 
 /// Return the directory holding GCC's builtin headers (stdbool.h, stddef.h…), if discoverable.

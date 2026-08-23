@@ -17,6 +17,31 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # DEPENDENCIES.lock is the human-readable record of which upstream revisions the
+      # submodules are pinned to. It drifted from the actual pins before (it named
+      # machine-guest-tools v0.17.2 while the submodule sat on a later main commit), and a
+      # wrong record is worse than none when the question is "which libcmt is this built
+      # against?". Cheap to assert, so assert it on every push.
+      - name: Verify DEPENDENCIES.lock matches the submodule pins
+        run: |
+          set -euo pipefail
+          status=0
+          while read -r repo tag sha; do
+            [[ -z "${repo:-}" || "${repo:0:1}" == "#" ]] && continue
+            path="third_party/${repo##*/}"
+            actual=$(git ls-tree HEAD "$path" | awk '{print $3}')
+            if [[ -z "$actual" ]]; then
+              echo "::error::DEPENDENCIES.lock names $repo but $path is not a submodule of this tree"
+              status=1
+            elif [[ "$actual" != "$sha" ]]; then
+              echo "::error::$repo ($tag): DEPENDENCIES.lock says $sha, $path is pinned to $actual"
+              status=1
+            else
+              echo "ok: $repo $tag $sha"
+            fi
+          done < DEPENDENCIES.lock
+          exit $status
+
       - name: Install libclang for bindgen
         run: sudo apt-get update && sudo apt-get install -y clang libclang-dev
 
@@ -128,6 +153,128 @@ jobs:
           ar p "$lib" "$member" > "$obj"
           file "$obj" | grep -F 'RISC-V'
           rm -f "$obj"
+
+      # Inspecting the archive is not enough: libcma.a's parser_impl.o references libcmt's
+      # cmt_abi_*/cmt_buf_* symbols, which live OUTSIDE the archive. Archive members are pulled
+      # lazily, so a missing libcmt only shows up when something actually calls the C parser.
+      # This links a real riscv64 binary that does, against the same `-lcma -lcmt` that build.rs
+      # emits for the riscv64 backend, inside the builder image where the machine-guest-tools
+      # package supplies libcmt. tests/c_parser_link.rs is the host-side counterpart.
+      - name: Link a real riscv64 binary against libcma + libcmt
+        working-directory: third_party/machine-asset-tools
+        run: |
+          set -euo pipefail
+          cat > cmt_link_probe.c <<'PROBE'
+          #include <libcma/parser.h>
+          #include <string.h>
+          int main(void) {
+              unsigned char payload[52];
+              memset(payload, 0, sizeof payload);
+              payload[19] = 1;    /* sender */
+              payload[51] = 4;    /* value  */
+              cmt_rollup_advance_t advance;
+              memset(&advance, 0, sizeof advance);
+              advance.payload.length = sizeof payload;
+              advance.payload.data = payload;
+              cma_parser_input_t out;
+              memset(&out, 0, sizeof out);
+              /* Forces parser_impl.o (and therefore libcmt) into the link. */
+              return cma_parser_decode_advance(
+                  CMA_PARSER_INPUT_TYPE_ETHER_DEPOSIT, &advance, &out) == 0 ? 0 : 1;
+          }
+          PROBE
+          # The probe is written into the working directory rather than /tmp so that the single
+          # existing mount carries it — a second `-v /tmp/...` bind is refused outright by Docker
+          # Desktop, which does not share /tmp by default.
+          trap 'rm -f cmt_link_probe.c' EXIT
+          docker run --platform linux/riscv64 --rm \
+            -v "$PWD":/mnt/app -w /mnt/app libcma-builder \
+            bash -euxc '
+              g++ -std=c++20 -Iinclude -Ithird-party -x c++ cmt_link_probe.c \
+                  -L build/riscv64 -lcma -lcmt -lstdc++ -o /tmp/cmt_link_probe
+              # `readelf`, not `file`: the builder image ships binutils (it has g++) but no
+              # file(1). The neighbouring artifact check can use file(1) because it runs on the
+              # runner rather than inside this container.
+              readelf -h /tmp/cmt_link_probe | grep -F "RISC-V"
+              # Runs natively here (the container IS riscv64), so this also proves the linked
+              # C parser actually decodes the vector rather than merely resolving symbols.
+              /tmp/cmt_link_probe
+            '
+
+
+  # The riscv64 backend as an APPLICATION consumes it: cross-compiled and linked into a
+  # fully static executable. Split out of riscv-link-check deliberately — that job runs a
+  # riscv64 container under QEMU, which is slow, and none of this needs emulation. build.rs
+  # cross-compiles libcma natively with the RISC-V GCC 14 toolchain, so the two jobs run in
+  # parallel and the wall clock is the slower of the two rather than their sum.
+  #
+  # Why an executable: `cargo build` on a library only emits an rlib, whose members are pulled
+  # lazily, so a library build cannot see a missing or wrongly-bound native dependency.
+  # Why static: the Cartesi machine rootfs has no `/lib/ld.so.1`, so an application retaining
+  # any NEEDED entry cannot be exec'd, and the machine reports only
+  # `dapp failed to start with No such file or directory`. A dynamically-bound libstdc++ used
+  # to slip through exactly here.
+  riscv-rust-link:
+    runs-on: ubuntu-latest
+    env:
+      CMA_RISCV64_CXX: riscv64-linux-gnu-g++-14
+      CMA_RISCV64_CC: riscv64-linux-gnu-gcc-14
+      # Must match the version the application runtime image installs, so the app links and
+      # runs against one libcmt ABI. Keep in step with DEPENDENCIES.lock.
+      MACHINE_GUEST_TOOLS_VERSION: "0.18.0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install the RISC-V GCC 14 cross toolchain + bindgen deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            g++-14-riscv64-linux-gnu gcc-14-riscv64-linux-gnu binutils-riscv64-linux-gnu \
+            clang libclang-dev build-essential make wget curl
+
+      # Boost is ~210 MB and build.rs fetches it through machine-asset-tools' Makefile. Cache
+      # the download so only the first run on a given Boost version pays for it.
+      - name: Cache third-party downloads
+        uses: actions/cache@v4
+        with:
+          path: third_party/machine-asset-tools/third-party/downloads
+          key: mat-downloads-${{ hashFiles('third_party/machine-asset-tools/Makefile') }}
+
+      - name: Stage riscv64 libcmt into the cross sysroot
+        run: |
+          set -euxo pipefail
+          # Exactly what an application Dockerfile must do — see the README section on the
+          # riscv64 libcmt requirement. libcma.a does not contain libcmt's cmt_abi_*/cmt_buf_*.
+          curl -fsSL -o /tmp/gt.deb \
+            "https://github.com/cartesi/machine-guest-tools/releases/download/v${MACHINE_GUEST_TOOLS_VERSION}/machine-guest-tools_riscv64.deb"
+          dpkg-deb -x /tmp/gt.deb /tmp/gt
+          sudo cp -a /tmp/gt/usr/lib/libcmt.a   /usr/riscv64-linux-gnu/lib/
+          sudo cp -a /tmp/gt/usr/include/libcmt /usr/riscv64-linux-gnu/include/
+
+      - name: Cross-link a fully static riscv64 Rust binary
+        run: |
+          set -euxo pipefail
+          rustup target add riscv64gc-unknown-linux-gnu
+
+          RUSTFLAGS="-C target-feature=+crt-static -C linker=riscv64-linux-gnu-g++-14" \
+            cargo build --release --no-default-features --features riscv64 \
+              --target riscv64gc-unknown-linux-gnu --example link_probe
+
+          bin=target/riscv64gc-unknown-linux-gnu/release/examples/link_probe
+          file "$bin" | grep -F 'RISC-V'
+          if riscv64-linux-gnu-readelf -l "$bin" | grep -i 'interpreter'; then
+            echo "::error::riscv64 binary requests an ELF interpreter; the machine rootfs has no /lib/ld.so.1"
+            exit 1
+          fi
+          if riscv64-linux-gnu-readelf -d "$bin" 2>/dev/null | grep 'NEEDED'; then
+            echo "::error::riscv64 binary has dynamic dependencies; it must be fully static"
+            exit 1
+          fi
+          echo "ok: fully static riscv64 executable, no interpreter and no NEEDED entries"
 
   # ===========================================================================
   # TODO(cross-arch-differential): the ULTIMATE host<->machine reproducibility
